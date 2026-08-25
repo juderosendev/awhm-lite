@@ -34,6 +34,7 @@ from .entities import EntityResolver
 from .entity_linking import find_links
 from .extraction import extract_from_log_entries
 from .ner import NERExtractor
+from .stage2 import LLMClient, Stage2Refiner
 from .temporal import ResolvedDate, TemporalParser, validity_from_context
 
 logger = logging.getLogger("awhm.consolidation")
@@ -73,6 +74,7 @@ class Candidate:
     valid_from: str | None = None
     valid_to: str | None = None
     mentioned_dates: list[str] = field(default_factory=list)
+    key_override: str | None = None  # explicit slot key (Stage 2 proposals)
 
     def __post_init__(self) -> None:
         if not self.refs and self.message_index is not None:
@@ -87,6 +89,7 @@ class Stage1Pipeline:
         config: AWHMConfig,
         graph: MemoryGraph,
         embedding_service: EmbeddingService,
+        llm_client: LLMClient | None = None,
     ) -> None:
         self.config = config
         self.graph = graph
@@ -95,6 +98,7 @@ class Stage1Pipeline:
         self.ner = NERExtractor(labels=config.ner_labels)
         self.temporal = TemporalParser()
         self.scorer = StrengthScorer(config)
+        self.llm_client = llm_client
         self._ner_unavailable_logged = False
 
     # ── Public API ─────────────────────────────────────────────
@@ -201,7 +205,18 @@ class Stage1Pipeline:
             ))
 
         keep = first_occurrences([c.content for c in candidates])
-        return [candidates[i] for i in keep]
+        candidates = [candidates[i] for i in keep]
+
+        # Stage 2: an LLM proposes what the rules missed; proposals are
+        # validated and deduplicated against everything above.
+        if self.config.stage2_enabled and self.llm_client is not None:
+            known = {statement_key(c.content) for c in candidates}
+            candidates.extend(
+                Stage2Refiner(self.config, self.llm_client).refine(
+                    session_id, entries, start_idx, known,
+                )
+            )
+        return candidates
 
     def _extract_entities(self, messages: list[str], start_idx: int):
         try:
@@ -273,7 +288,7 @@ class Stage1Pipeline:
             if cand.source == "ner" or cand.content in duplicate_contents:
                 continue
 
-            key = canonical_key_for_content(cand.content, cand.node_type)
+            key = cand.key_override or canonical_key_for_content(cand.content, cand.node_type)
             superseded = self._supersede(cand, key, now_iso)
             node = self._new_node(cand, embeddings[i], key=key, superseded=superseded, now_iso=now_iso)
             self.graph.add_node(node)

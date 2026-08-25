@@ -227,6 +227,13 @@ class RetrievalEngine:
                     if semantic_sims[nid] >= self.config.embed_threshold:
                         anchors.add(nid)
 
+        # Only anchors that are themselves eligible (current, or valid as of
+        # the requested moment) may pull in neighbours; a superseded fact must
+        # not drag its linked entities back into the results.
+        anchors = {
+            nid for nid in anchors
+            if (n := self.graph.get_node(nid)) is not None and self._eligible(n, include_history, moment)
+        }
         if not anchors:
             return []
 
@@ -247,8 +254,6 @@ class RetrievalEngine:
             node = self.graph.get_node(nid)
             if node is not None and self._eligible(node, include_history, moment):
                 candidates.append(node)
-        if not candidates:
-            return []
 
         # Strength is only needed for the candidates we are about to rank.
         now = utcnow()

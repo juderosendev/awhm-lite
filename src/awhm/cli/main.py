@@ -12,8 +12,15 @@ from ..config import AWHMConfig
 def get_session(args):
     """Create an AWHMSession from CLI args."""
     from .. import AWHMSession
+
     config = AWHMConfig(data_dir=args.data_dir)
-    return AWHMSession.start_session(config, use_mock_embeddings=args.mock)
+    llm_client = None
+    if getattr(args, "stage2", False):
+        from ..consolidation.stage2 import AnthropicClient
+
+        config.stage2_enabled = True
+        llm_client = AnthropicClient(model=args.stage2_model or config.stage2_model)
+    return AWHMSession.start_session(config, use_mock_embeddings=args.mock, llm_client=llm_client)
 
 
 def cmd_status(args):
@@ -108,7 +115,20 @@ def cmd_delete(args):
 
 
 def cmd_eval(args):
-    from ..eval import run_builtin_benchmark
+    from ..eval import load_corpus, load_longmemeval, run_builtin_benchmark, run_replay, summarize
+
+    if args.corpus:
+        corpus = (
+            load_longmemeval(args.corpus, limit=args.limit)
+            if args.longmemeval
+            else load_corpus(args.corpus)
+        )
+        report = run_replay(corpus, k=args.k, use_mock_embeddings=args.mock)
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            print(summarize(report))
+        return
 
     report = run_builtin_benchmark(
         k=args.k,
@@ -168,7 +188,13 @@ def main():
     )
 
     # consolidate
-    sub.add_parser("consolidate", help="Run Stage 1 consolidation")
+    p_cons = sub.add_parser("consolidate", help="Consolidate pending sessions into the graph")
+    p_cons.add_argument(
+        "--stage2",
+        action="store_true",
+        help="Also run Stage 2 LLM refinement (needs the [stage2] extra and Anthropic credentials)",
+    )
+    p_cons.add_argument("--stage2-model", dest="stage2_model", default=None, help="Model for Stage 2")
 
     # snapshot
     p_snap = sub.add_parser("snapshot", help="Manage snapshots")
@@ -187,6 +213,9 @@ def main():
         action="store_true",
         help="Print full JSON report instead of summary",
     )
+    p_eval.add_argument("--corpus", default=None, help="Replay a corpus file instead of the built-in benchmark")
+    p_eval.add_argument("--longmemeval", action="store_true", help="Corpus is in LongMemEval format")
+    p_eval.add_argument("--limit", type=int, default=None, help="Only the first N LongMemEval instances")
 
     # hook: delegate everything after "hook" to the hooks module
     sub.add_parser("hook", help="Claude Code hook commands (see `awhm hook --help`)", add_help=False)

@@ -75,8 +75,11 @@ class AWHMConfig:
     # Cold-start: fall back to BM25 over raw logs while few sessions exist
     cold_start_session_count: int = 10
 
-    # Stage 2 (future-facing; optional)
+    # Stage 2: optional offline LLM refinement (needs an LLM client)
     stage2_enabled: bool = False
+    stage2_model: str = "claude-opus-5"
+    stage2_max_messages: int = 60       # transcript messages per LLM call
+    stage2_min_confidence: float = 0.5  # drop proposals below this
     ann_index_type: str = "none"
 
     # Privacy/deletion behaviour

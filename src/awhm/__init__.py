@@ -21,6 +21,7 @@ from typing import Any
 
 from .config import AWHMConfig
 from .consolidation.pipeline import Stage1Pipeline
+from .consolidation.stage2 import AnthropicClient, LLMClient, MockLLMClient
 from .deletion.hard_delete import DeletionResult, hard_delete
 from .graph.memory_graph import MemoryGraph
 from .graph.serialization import load_graph, save_graph
@@ -45,6 +46,9 @@ __version__ = "0.2.0"
 __all__ = [
     "AWHMConfig",
     "AWHMSession",
+    "AnthropicClient",
+    "LLMClient",
+    "MockLLMClient",
     "BM25Index",
     "BufferEntryType",
     "DeletionResult",
@@ -87,11 +91,13 @@ class AWHMSession:
         session_id: str,
         graph: MemoryGraph,
         embedding_service: EmbeddingService,
+        llm_client: LLMClient | None = None,
     ) -> None:
         self.config = config
         self.session_id = session_id
         self.graph = graph
         self.embedding = embedding_service
+        self.llm_client = llm_client
 
         self.logger = RawLogger(config, session_id)
         self.buffer = SessionBuffer()
@@ -114,6 +120,7 @@ class AWHMSession:
         config: AWHMConfig | None = None,
         session_id: str | None = None,
         use_mock_embeddings: bool = False,
+        llm_client: LLMClient | None = None,
     ) -> AWHMSession:
         """Create and start a session.
 
@@ -122,6 +129,8 @@ class AWHMSession:
             session_id: Custom session id; a UUID is generated when ``None``.
             use_mock_embeddings: Deterministic hash-based embeddings, for
                 tests and for running without sentence-transformers.
+            llm_client: Enables Stage 2 refinement during consolidation when
+                ``config.stage2_enabled`` is set (e.g. ``AnthropicClient()``).
         """
         config = config or AWHMConfig()
         config.ensure_dirs()
@@ -134,7 +143,7 @@ class AWHMSession:
         else:
             embedding = SentenceTransformerEmbedding(config.embed_model)
 
-        session = cls(config, session_id, graph, embedding)
+        session = cls(config, session_id, graph, embedding, llm_client=llm_client)
         session.wal.recover()  # crash recovery
         session.wal.start()
         return session
@@ -207,13 +216,14 @@ class AWHMSession:
 
     def consolidate(self) -> dict[str, int]:
         """Run Stage 1 consolidation on every session with unprocessed messages."""
-        return Stage1Pipeline(self.config, self.graph, self.embedding).consolidate_all_pending()
+        return self._pipeline().consolidate_all_pending()
 
     def consolidate_current(self) -> int:
         """Consolidate this session's unprocessed messages."""
-        return Stage1Pipeline(self.config, self.graph, self.embedding).consolidate_session(
-            self.session_id,
-        )
+        return self._pipeline().consolidate_session(self.session_id)
+
+    def _pipeline(self) -> Stage1Pipeline:
+        return Stage1Pipeline(self.config, self.graph, self.embedding, llm_client=self.llm_client)
 
     # ── Deletion and snapshots ─────────────────────────────────
 
