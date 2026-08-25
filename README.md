@@ -4,7 +4,7 @@ External long-term memory for LLMs. No cloud, no API keys, runs entirely local.
 
 AWHM Lite gives any LLM persistent memory across conversations through append-only logging, regex-based pattern matching, a contradiction-aware memory graph, symbolic consolidation (zero LLM calls), and retrieval via lexical + semantic feature fusion.
 
-**Status:** research prototype, built February 2026. Working and tested (88 tests), not under active development.
+**Status:** research prototype. Built February 2026, published August 2026. Working and tested (88 tests), not under active development.
 
 ## Project docs
 
