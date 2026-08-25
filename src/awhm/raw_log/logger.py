@@ -18,8 +18,15 @@ class RawLogger:
         self.config = config
         self.session_id = session_id
         self._path = config.logs_dir / f"{session_id}.jsonl"
-        self._msg_index = 0
         config.ensure_dirs()
+        self._msg_index = self._count_existing()
+
+    def _count_existing(self) -> int:
+        """Continue numbering from an existing log (sessions resumed across processes)."""
+        if not self._path.exists():
+            return 0
+        with open(self._path, encoding="utf-8") as f:
+            return sum(1 for line in f if line.strip())
 
     @property
     def path(self) -> Path:

@@ -139,14 +139,26 @@ class AWHMSession:
         session.wal.start()
         return session
 
-    def end_session(self) -> None:
-        """End the session: stop the WAL timer, flush, and save the graph."""
+    def suspend(self) -> None:
+        """Persist everything but keep the session resumable.
+
+        Stops the WAL timer, flushes the buffer to the WAL and saves the
+        graph. A later ``start_session`` with the same ``session_id`` picks
+        the buffer back up. This is what per-turn hooks use, since each hook
+        runs in a fresh process.
+        """
         if self._closed:
             return
         self._closed = True
         self.wal.stop()
-        self.wal.clear_wal()
         save_graph(self.graph, self.config)
+
+    def end_session(self) -> None:
+        """End the session: persist, then discard the WAL."""
+        already_closed = self._closed
+        self.suspend()
+        if not already_closed:
+            self.wal.clear_wal()
 
     def __enter__(self) -> AWHMSession:
         return self

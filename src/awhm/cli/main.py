@@ -188,6 +188,14 @@ def main():
         help="Print full JSON report instead of summary",
     )
 
+    # hook: delegate everything after "hook" to the hooks module
+    sub.add_parser("hook", help="Claude Code hook commands (see `awhm hook --help`)", add_help=False)
+
+    if len(sys.argv) > 1 and sys.argv[1] == "hook":
+        from ..hooks import run as run_hook
+
+        sys.exit(run_hook(sys.argv[2:]))
+
     args = parser.parse_args()
 
     commands = {
