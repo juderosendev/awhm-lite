@@ -4,20 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "awhm-lite"
-version = "0.1.0"
-description = "AWHM Lite — External memory system for LLMs"
+version = "0.2.0"
+description = "External long-term memory for LLM agents. Fully local, zero LLM calls."
+readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = [
-    "sentence-transformers>=3.0",
     "numpy>=1.24",
     "spacy>=3.7",
-    "rank-bm25>=0.2.2",
     "dateparser>=1.2",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+embeddings = ["sentence-transformers>=3.0"]
 mcp = ["mcp[cli]>=1.2"]
+dev = ["pytest>=7.0", "ruff>=0.5"]
 
 [project.scripts]
 awhm = "awhm.cli.main:main"
@@ -28,3 +29,15 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["awhm"]
