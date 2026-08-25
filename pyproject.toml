@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "awhm-lite"
+version = "0.1.0"
+description = "AWHM Lite — External memory system for LLMs"
+requires-python = ">=3.10"
+dependencies = [
+    "sentence-transformers>=3.0",
+    "numpy>=1.24",
+    "spacy>=3.7",
+    "rank-bm25>=0.2.2",
+    "dateparser>=1.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+mcp = ["mcp[cli]>=1.2"]
+
+[project.scripts]
+awhm = "awhm.cli.main:main"
+awhm-mcp = "awhm.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
