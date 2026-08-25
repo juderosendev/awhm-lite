@@ -1,6 +1,7 @@
 """Tests for RawLogger."""
 
 import json
+
 from awhm.raw_log.logger import RawLogger
 from awhm.types import Role
 

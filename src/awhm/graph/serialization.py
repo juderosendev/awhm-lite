@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 from ..config import AWHMConfig
@@ -31,7 +30,7 @@ def load_graph(config: AWHMConfig) -> MemoryGraph:
     path = config.graph_path
     if not path.exists():
         return MemoryGraph()
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         data = json.load(f)
     data.pop("version", "1.0")
     _migrate_graph_data(data)

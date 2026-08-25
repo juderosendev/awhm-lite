@@ -1,32 +1,46 @@
-"""Configuration dataclass with all spec parameters and path helpers."""
+"""Configuration dataclass with all tunable parameters and path helpers."""
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+
+DEFAULT_DATA_DIR = "~/.awhm"
+
+# spaCy entity labels worth remembering. Numeric and time-like labels
+# (CARDINAL, ORDINAL, QUANTITY, PERCENT, MONEY, TIME, DATE) produce noise
+# nodes; DATE is handled separately by the temporal parser.
+DEFAULT_NER_LABELS: frozenset[str] = frozenset({
+    "PERSON", "ORG", "GPE", "LOC", "PRODUCT", "EVENT",
+    "WORK_OF_ART", "LANGUAGE", "NORP", "FAC", "LAW",
+})
 
 
 @dataclass
 class AWHMConfig:
-    """All 13 spec parameters + path helpers."""
+    """All tunable parameters plus path helpers.
 
-    data_dir: str = field(default_factory=lambda: os.path.expanduser("~/.awhm"))
+    ``data_dir`` accepts ``~`` and environment variables; it is expanded on
+    construction so every consumer sees an absolute path.
+    """
 
-    # Strength scoring - recency decay
-    alpha: float = 0.3          # Power-law exponent
-    beta: float = 0.1           # Decay scaling constant
+    data_dir: str = DEFAULT_DATA_DIR
 
-    # Strength scoring - composite weights
-    w_rec: float = 0.4          # Recency weight
-    w_freq: float = 0.6         # Frequency weight
+    # Strength scoring: recency decay s_rec = (1 + beta * hours) ** (-alpha)
+    alpha: float = 0.3
+    beta: float = 0.1
 
-    # Retrieval ranking
-    w_sim: float = 0.7          # Similarity weight in R(v,q)
-    w_str: float = 0.3          # Strength weight in R(v,q)
-    eta: float = 0.5            # Similarity-gate exponent
+    # Strength scoring: composite weights S = w_rec * s_rec + w_freq * s_freq
+    w_rec: float = 0.4
+    w_freq: float = 0.6
 
-    # Retrieval feature profile (new path; w_sim/w_str retained for compatibility)
+    # Legacy two-signal ranking (kept for backward compatibility)
+    w_sim: float = 0.7
+    w_str: float = 0.3
+    eta: float = 0.5
+
+    # Retrieval feature blend
     retrieval_profile: str = "balanced"
     w_semantic: float = 0.55
     w_lexical: float = 0.20
@@ -37,13 +51,16 @@ class AWHMConfig:
     trace_retrieval: bool = False
 
     # Retrieval
-    k: int = 10                 # Top-k retrieval count
-    bm25_threshold: float = 1.0         # Minimum BM25 score for anchor set
-    embed_threshold: float = 0.3        # Minimum cosine sim for anchor set
+    k: int = 10
+    bm25_threshold: float = 1.0         # Minimum raw BM25 score for a lexical anchor
+    embed_threshold: float = 0.3        # Minimum cosine similarity for a semantic anchor
+    raw_log_score_scale: float = 0.5    # Cold-start hits are scaled into [0, scale]
 
     # Consolidation
-    entity_link_threshold: float = 0.85  # Cosine threshold for entity linking
-    dedup_threshold: float = 0.92        # Cosine threshold for deduplication
+    entity_link_threshold: float = 0.85     # Cosine threshold for entity linking
+    dedup_threshold: float = 0.92           # Cosine threshold for near-duplicates
+    correction_window_messages: int = 3   # A correction supersedes a same-family statement this close
+    ner_labels: frozenset[str] = DEFAULT_NER_LABELS
 
     # Session buffer
     buffer_flush_interval: float = 30.0  # WAL flush interval in seconds
@@ -52,15 +69,21 @@ class AWHMConfig:
     embed_model: str = "all-MiniLM-L6-v2"
     embed_dim: int = 384
 
-    # Cold-start
+    # Cold-start: fall back to BM25 over raw logs while few sessions exist
     cold_start_session_count: int = 10
 
     # Stage 2 (future-facing; optional)
     stage2_enabled: bool = False
     ann_index_type: str = "none"
 
-    # Privacy/deletion behavior
+    # Privacy/deletion behaviour
     delete_snapshots_on_hard_delete: bool = True
+
+    def __post_init__(self) -> None:
+        self.data_dir = os.path.expanduser(os.path.expandvars(self.data_dir))
+        self.ner_labels = frozenset(label.upper() for label in self.ner_labels)
+
+    # ── Paths ──────────────────────────────────────────────────
 
     @property
     def base_path(self) -> Path:
@@ -91,7 +114,7 @@ class AWHMConfig:
         return self.wal_dir / "session_buffer.wal"
 
     def wal_path_for_session(self, session_id: str) -> Path:
-        """Return session-scoped WAL path, with a filesystem-safe filename."""
+        """Return session-scoped WAL path with a filesystem-safe filename."""
         safe = "".join(
             c if c.isalnum() or c in ("-", "_", ".") else "_"
             for c in session_id
@@ -116,6 +139,6 @@ class AWHMConfig:
 
     def ensure_dirs(self) -> None:
         """Create all required directories."""
-        for d in [self.logs_dir, self.graph_dir, self.snapshots_dir,
-                  self.wal_dir, self.meta_dir]:
+        for d in (self.logs_dir, self.graph_dir, self.snapshots_dir,
+                  self.wal_dir, self.meta_dir):
             d.mkdir(parents=True, exist_ok=True)

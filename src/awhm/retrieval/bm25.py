@@ -1,12 +1,19 @@
-"""BM25Index: rank-bm25 wrapper with simple tokenization + stopword removal."""
+"""A small, dependency-free BM25 index.
+
+Uses the Lucene formulation of IDF, ``ln(1 + (N - n + 0.5) / (n + 0.5))``,
+which is always positive. The classic Robertson IDF goes negative for terms
+that appear in more than half the documents, which on the tiny corpora a
+personal memory graph starts with meant either no results or every document
+scoring above zero after an ad-hoc shift.
+"""
 
 from __future__ import annotations
 
+import math
 import re
+from collections import Counter
 
-from rank_bm25 import BM25Okapi
-
-# Small hardcoded stopword set (avoids NLTK dependency)
+# Small hardcoded stopword set (avoids an NLTK dependency)
 STOPWORDS = frozenset({
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
     "have", "has", "had", "do", "does", "did", "will", "would", "could",
@@ -27,52 +34,70 @@ _TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
 
 
 def tokenize(text: str) -> list[str]:
-    """Simple tokenization: lowercase alphanumeric tokens, stopwords removed."""
-    tokens = _TOKEN_RE.findall(text.lower())
-    return [t for t in tokens if t not in STOPWORDS]
+    """Lowercase alphanumeric tokens with stopwords removed."""
+    return [t for t in _TOKEN_RE.findall(text.lower()) if t not in STOPWORDS]
 
 
 class BM25Index:
-    """BM25 index over a corpus of documents."""
+    """BM25 over a list of documents (Okapi weighting, Lucene IDF)."""
 
-    def __init__(self, documents: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        documents: list[str] | None = None,
+        *,
+        k1: float = 1.5,
+        b: float = 0.75,
+    ) -> None:
+        self.k1 = k1
+        self.b = b
         self._documents: list[str] = []
-        self._tokenized: list[list[str]] = []
-        self._bm25: BM25Okapi | None = None
+        self._term_freqs: list[Counter[str]] = []
+        self._doc_lengths: list[int] = []
+        self._avg_len: float = 0.0
+        self._idf: dict[str, float] = {}
         if documents:
             self.build(documents)
 
     def build(self, documents: list[str]) -> None:
-        """Build/rebuild the index from a list of document strings."""
-        self._documents = documents
-        self._tokenized = [tokenize(d) for d in documents]
-        if self._tokenized:
-            self._bm25 = BM25Okapi(self._tokenized)
-        else:
-            self._bm25 = None
+        """Build or rebuild the index from a list of document strings."""
+        self._documents = list(documents)
+        tokenized = [tokenize(d) for d in self._documents]
+        self._term_freqs = [Counter(tokens) for tokens in tokenized]
+        self._doc_lengths = [len(tokens) for tokens in tokenized]
+        n_docs = len(self._documents)
+        self._avg_len = (sum(self._doc_lengths) / n_docs) if n_docs else 0.0
+
+        doc_freq: Counter[str] = Counter()
+        for tf in self._term_freqs:
+            doc_freq.update(tf.keys())
+        self._idf = {
+            term: math.log(1.0 + (n_docs - df + 0.5) / (df + 0.5))
+            for term, df in doc_freq.items()
+        }
+
+    def scores(self, query: str) -> list[float]:
+        """Raw BM25 score for every document, in index order."""
+        q_tokens = tokenize(query)
+        if not q_tokens or not self._documents:
+            return [0.0] * len(self._documents)
+        results: list[float] = []
+        for tf, length in zip(self._term_freqs, self._doc_lengths, strict=True):
+            norm = self.k1 * (1.0 - self.b + self.b * (length / self._avg_len if self._avg_len else 0.0))
+            score = 0.0
+            for term in q_tokens:
+                freq = tf.get(term, 0)
+                if not freq:
+                    continue
+                idf = self._idf.get(term, 0.0)
+                score += idf * (freq * (self.k1 + 1.0)) / (freq + norm)
+            results.append(score)
+        return results
 
     def search(self, query: str, top_k: int = 10) -> list[tuple[int, float]]:
-        """Search the index. Returns list of (doc_index, score) sorted by score desc.
-
-        Uses relative scoring: normalizes against max score so that even
-        small corpora (where IDF can be negative) return results.
-        """
-        if self._bm25 is None or not self._documents:
-            return []
-        q_tokens = tokenize(query)
-        if not q_tokens:
-            return []
-        scores = self._bm25.get_scores(q_tokens)
-        max_score = float(max(scores)) if len(scores) > 0 else 0.0
-        # If all scores are non-positive, shift so best score = 1.0
-        if max_score <= 0 and len(scores) > 0:
-            min_score = float(min(scores))
-            shift = abs(min_score) + 1.0
-            indexed = [(i, float(s) + shift) for i, s in enumerate(scores)]
-        else:
-            indexed = [(i, float(s)) for i, s in enumerate(scores) if s > 0]
-        indexed.sort(key=lambda x: x[1], reverse=True)
-        return indexed[:top_k]
+        """Return ``(doc_index, score)`` pairs with score > 0, best first."""
+        scored = [(i, s) for i, s in enumerate(self.scores(query)) if s > 0.0]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:top_k]
 
     @property
     def document_count(self) -> int:

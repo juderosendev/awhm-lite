@@ -1,16 +1,26 @@
-"""AWHM Lite — External memory system for LLMs.
+"""AWHM Lite: external long-term memory for LLM agents.
 
-Top-level public API via AWHMSession facade.
+Everything runs locally with zero LLM calls. The top-level entry point is
+:class:`AWHMSession`::
+
+    from awhm import AWHMSession, Role
+
+    with AWHMSession.start_session() as session:
+        session.log_message(Role.USER, "My name is Alice")
+        for result in session.query("What is the user's name?"):
+            print(result.content)
+        session.consolidate_current()
 """
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any
 
 from .config import AWHMConfig
 from .consolidation.pipeline import Stage1Pipeline
-from .deletion.hard_delete import hard_delete, DeletionResult
+from .deletion.hard_delete import DeletionResult, hard_delete
 from .graph.memory_graph import MemoryGraph
 from .graph.serialization import load_graph, save_graph
 from .graph.strength import StrengthScorer
@@ -24,19 +34,50 @@ from .retrieval.embedding import (
 )
 from .retrieval.engine import RetrievalEngine, RetrievalResult
 from .session_buffer.buffer import SessionBuffer
+from .session_buffer.models import BufferEntry
 from .session_buffer.wal import WALManager
 from .snapshots.manager import SnapshotManager
 from .types import BufferEntryType, EdgeType, NodeStatus, NodeType, Role
 
+__version__ = "0.2.0"
+
+__all__ = [
+    "AWHMConfig",
+    "AWHMSession",
+    "BM25Index",
+    "BufferEntryType",
+    "DeletionResult",
+    "EdgeType",
+    "EmbeddingService",
+    "MemoryGraph",
+    "MockEmbeddingService",
+    "NodeStatus",
+    "NodeType",
+    "RetrievalEngine",
+    "RetrievalResult",
+    "Role",
+    "SentenceTransformerEmbedding",
+    "SessionBuffer",
+    "SnapshotManager",
+    "Stage1Pipeline",
+    "StrengthScorer",
+    "WALManager",
+    "__version__",
+]
+
+logging.getLogger("awhm").addHandler(logging.NullHandler())
+
+# Roles whose messages feed the real-time session buffer.
+_BUFFERED_ROLES = frozenset({Role.USER.value, Role.TOOL_RESULT.value})
+
 
 class AWHMSession:
-    """Top-level facade for AWHM Lite.
+    """Top-level facade: logging, buffering, retrieval, consolidation, deletion.
 
-    Usage:
-        session = AWHMSession.start_session(config)
-        session.log_message(Role.USER, "Hello")
-        results = session.query("some query")
-        session.end_session()
+    Prefer :meth:`start_session` over the constructor; it loads the graph,
+    wires the embedding service and recovers the write-ahead log. Sessions
+    are context managers, so ``with AWHMSession.start_session() as s:`` ends
+    the session (final flush, graph save) on exit.
     """
 
     def __init__(
@@ -57,11 +98,14 @@ class AWHMSession:
         self.log_reader = RawLogReader(config)
         self.retrieval = self._build_retrieval_engine()
         self.snapshots = SnapshotManager(config)
+        self._closed = False
 
     def _build_retrieval_engine(self) -> RetrievalEngine:
         return RetrievalEngine(
             self.config, self.graph, self.buffer, self.embedding, self.log_reader,
         )
+
+    # ── Lifecycle ──────────────────────────────────────────────
 
     @classmethod
     def start_session(
@@ -70,38 +114,46 @@ class AWHMSession:
         session_id: str | None = None,
         use_mock_embeddings: bool = False,
     ) -> AWHMSession:
-        """Create and start a new session.
+        """Create and start a session.
 
         Args:
-            config: Configuration. Uses defaults if None.
-            session_id: Custom session ID. Generated if None.
-            use_mock_embeddings: Use mock embeddings for testing.
+            config: Configuration; defaults are used when ``None``.
+            session_id: Custom session id; a UUID is generated when ``None``.
+            use_mock_embeddings: Deterministic hash-based embeddings, for
+                tests and for running without sentence-transformers.
         """
-        if config is None:
-            config = AWHMConfig()
+        config = config or AWHMConfig()
         config.ensure_dirs()
+        session_id = session_id or str(uuid.uuid4())
 
-        if session_id is None:
-            session_id = str(uuid.uuid4())
-
-        # Load existing graph
         graph = load_graph(config)
-
-        # Initialize embedding service
+        embedding: EmbeddingService
         if use_mock_embeddings:
-            embedding: EmbeddingService = MockEmbeddingService(config.embed_dim)
+            embedding = MockEmbeddingService(config.embed_dim)
         else:
             embedding = SentenceTransformerEmbedding(config.embed_model)
 
         session = cls(config, session_id, graph, embedding)
-
-        # Recover WAL if exists (crash recovery)
-        session.wal.recover()
-
-        # Start WAL flushing
+        session.wal.recover()  # crash recovery
         session.wal.start()
-
         return session
+
+    def end_session(self) -> None:
+        """End the session: stop the WAL timer, flush, and save the graph."""
+        if self._closed:
+            return
+        self._closed = True
+        self.wal.stop()
+        self.wal.clear_wal()
+        save_graph(self.graph, self.config)
+
+    def __enter__(self) -> AWHMSession:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.end_session()
+
+    # ── Logging and retrieval ──────────────────────────────────
 
     def log_message(
         self,
@@ -109,15 +161,11 @@ class AWHMSession:
         content: str,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Log a message and run buffer pattern matching."""
+        """Append a message to the raw log and run buffer pattern matching."""
         entry = self.logger.log(role, content, metadata)
-
-        # Run pattern matching on user messages
         role_val = role.value if isinstance(role, Role) else role
-        if role_val in (Role.USER.value, Role.TOOL_RESULT.value):
-            self.buffer.process_message(
-                content, entry.timestamp, self.logger.msg_index - 1,
-            )
+        if role_val in _BUFFERED_ROLES:
+            self.buffer.process_message(content, entry.timestamp, self.logger.msg_index - 1)
 
     def query(
         self,
@@ -126,64 +174,54 @@ class AWHMSession:
         include_history: bool | None = None,
         with_trace: bool | None = None,
     ) -> list[RetrievalResult]:
-        """Query the memory system."""
+        """Retrieve the memories most relevant to ``query_text``."""
         return self.retrieval.query(
-            query_text,
-            k=k,
-            include_history=include_history,
-            with_trace=with_trace,
+            query_text, k=k, include_history=include_history, with_trace=with_trace,
         )
 
+    # ── Consolidation ──────────────────────────────────────────
+
     def consolidate(self) -> dict[str, int]:
-        """Run Stage 1 consolidation on all pending sessions."""
-        pipeline = Stage1Pipeline(self.config, self.graph, self.embedding)
-        return pipeline.consolidate_all_pending()
+        """Run Stage 1 consolidation on every session with unprocessed messages."""
+        return Stage1Pipeline(self.config, self.graph, self.embedding).consolidate_all_pending()
 
     def consolidate_current(self) -> int:
-        """Consolidate the current session."""
-        pipeline = Stage1Pipeline(self.config, self.graph, self.embedding)
-        return pipeline.consolidate_session(self.session_id)
+        """Consolidate this session's unprocessed messages."""
+        return Stage1Pipeline(self.config, self.graph, self.embedding).consolidate_session(
+            self.session_id,
+        )
+
+    # ── Deletion and snapshots ─────────────────────────────────
 
     def delete_node(self, node_id: str) -> DeletionResult:
-        """Hard-delete a node for privacy compliance."""
+        """Hard-delete a node and everything derived from it (privacy)."""
         return hard_delete(
-            node_id,
-            self.graph,
-            self.config,
-            self.buffer,
-            current_session_id=self.session_id,
+            node_id, self.graph, self.config, self.buffer, current_session_id=self.session_id,
         )
 
     def create_snapshot(self) -> str:
-        """Create a snapshot. Returns the snapshot path."""
-        path = self.snapshots.create(self.graph, self.buffer.to_dicts())
-        return str(path)
+        """Snapshot the graph and buffer. Returns the snapshot path."""
+        return str(self.snapshots.create(self.graph, self.buffer.to_dicts()))
 
     def restore_snapshot(self, path: str) -> None:
-        """Restore from a snapshot."""
+        """Replace the in-memory graph and buffer with a snapshot's contents."""
         self.graph, wal_state = self.snapshots.restore(path)
         self.buffer.clear()
-        from .session_buffer.models import BufferEntry
         for d in wal_state:
             self.buffer.add_entry(BufferEntry.from_dict(d))
-        # Rebind retrieval to restored in-memory graph state.
         self.retrieval = self._build_retrieval_engine()
         save_graph(self.graph, self.config)
-        self.wal.flush()
+        self.wal.flush(force=True)
+
+    # ── Introspection ──────────────────────────────────────────
 
     def status(self) -> dict[str, Any]:
-        """Return status info about the memory system."""
+        """Summary counters for the memory system."""
         return {
             "session_id": self.session_id,
             "node_count": self.graph.node_count(),
             "edge_count": self.graph.edge_count(),
-            "buffer_entries": len(self.buffer.entries),
+            "buffer_entries": len(self.buffer),
             "total_sessions": self.log_reader.session_count(),
             "log_messages": self.logger.msg_index,
         }
-
-    def end_session(self) -> None:
-        """End the session: stop WAL, flush final state."""
-        self.wal.stop()
-        self.wal.clear_wal()
-        save_graph(self.graph, self.config)

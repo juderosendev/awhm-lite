@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..session_buffer.patterns import match_message
 from ..raw_log.models import LogEntry
+from ..session_buffer.patterns import match_message
 
 
 @dataclass

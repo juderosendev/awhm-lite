@@ -32,7 +32,7 @@ class RawLogReader:
         if not path.exists():
             return []
         entries: list[LogEntry] = []
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:

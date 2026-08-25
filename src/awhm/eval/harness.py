@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import dataclass
 from tempfile import TemporaryDirectory
@@ -121,7 +122,7 @@ def _run_queries_and_metrics(
         hit_rank = _first_match_rank(results, case.expected_substring)
         forbidden_hit = _contains_any(results, case.forbidden_substring)
         recall = 1.0 if hit_rank is not None else 0.0
-        ndcg = 1.0 / _log2(hit_rank + 1) if hit_rank is not None else 0.0
+        ndcg = 1.0 / math.log2(hit_rank + 1) if hit_rank is not None else 0.0
 
         recall_hits += int(recall)
         ndcg_sum += ndcg
@@ -220,7 +221,7 @@ def _run_deletion_audit(
 def _snapshots_absent(config: AWHMConfig, token: str) -> bool:
     token = token.lower()
     for path in config.snapshots_dir.glob("snapshot_*.json"):
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         graph = data.get("graph", {})
         nodes = graph.get("nodes", {})
@@ -253,11 +254,6 @@ def _first_match_rank(results: list[Any], expected_substring: str) -> int | None
     return None
 
 
-def _log2(x: float) -> float:
-    # Local helper avoids introducing a math import solely for log2.
-    import math
-
-    return math.log(x, 2)
 
 
 def _percentile(values: list[float], p: int) -> float:

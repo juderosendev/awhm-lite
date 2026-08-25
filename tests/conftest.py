@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import sys
 import os
+import sys
 
 import pytest
 
@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from awhm.config import AWHMConfig
 from awhm.graph.memory_graph import MemoryGraph
-from awhm.graph.models import MemoryEdge, MemoryNode, StrengthScore
+from awhm.graph.models import MemoryEdge, MemoryNode
 from awhm.retrieval.embedding import MockEmbeddingService
 from awhm.types import EdgeType, NodeType
 

@@ -80,7 +80,7 @@ def test_cold_start_fallback(tmp_path):
     for i in range(3):
         s = AWHMSession.start_session(config, session_id=f"s{i}", use_mock_embeddings=True)
         s.log_message(Role.USER, f"Session {i}: Python programming is great")
-        s.log_message(Role.ASSISTANT, f"Indeed, Python is widely used")
+        s.log_message(Role.ASSISTANT, "Indeed, Python is widely used")
         s.end_session()
 
     # Query without consolidation — should use cold-start fallback
@@ -134,3 +134,40 @@ def test_correction_supersedes_old_memory(tmp_path):
     assert "superseded" in statuses
     assert "active" in statuses
     s.end_session()
+
+
+def test_correction_supersedes_recent_preference(tmp_path):
+    config = AWHMConfig(data_dir=str(tmp_path / "awhm"), cold_start_session_count=0)
+
+    with AWHMSession.start_session(config, session_id="s1", use_mock_embeddings=True) as s:
+        s.log_message(Role.USER, "I prefer Python")
+        s.log_message(Role.USER, "Actually, I prefer Rust")
+        s.consolidate_current()
+
+        current = " ".join(r.content.lower() for r in s.query("prefer", k=10))
+        assert "rust" in current
+        assert "python" not in current
+
+        statuses = {n.content.lower(): n.status for n in s.graph.all_nodes() if n.canonical_key}
+        assert statuses["i prefer python"] == "superseded"
+        assert statuses["actually, i prefer rust"] == "active"
+
+
+def test_unrelated_preferences_stay_additive(tmp_path):
+    config = AWHMConfig(data_dir=str(tmp_path / "awhm"), cold_start_session_count=0)
+
+    with AWHMSession.start_session(config, session_id="s1", use_mock_embeddings=True) as s:
+        s.log_message(Role.USER, "I prefer tabs")
+        s.log_message(Role.USER, "I prefer dark mode")
+        s.consolidate_current()
+        statuses = [n.status for n in s.graph.all_nodes() if n.canonical_key]
+        assert statuses and all(status == "active" for status in statuses)
+
+
+def test_context_manager_ends_session(tmp_path):
+    config = AWHMConfig(data_dir=str(tmp_path / "awhm"))
+    with AWHMSession.start_session(config, session_id="s1", use_mock_embeddings=True) as s:
+        s.log_message(Role.USER, "I prefer dark mode")
+        wal_path = config.wal_path_for_session("s1")
+    assert not wal_path.exists()
+    assert config.graph_path.exists()

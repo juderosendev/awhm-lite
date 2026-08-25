@@ -1,52 +1,75 @@
-"""NER via spaCy (en_core_web_sm) for Stage 1 consolidation."""
+"""Named-entity recognition via spaCy for Stage 1 consolidation."""
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
+
+SPACY_MODEL = "en_core_web_sm"
 
 
 @dataclass
 class ExtractedEntity:
     text: str
-    label: str  # PERSON, ORG, GPE, PRODUCT, etc.
+    label: str  # PERSON, ORG, GPE, PRODUCT, ...
     start: int
     end: int
     message_index: int | None = None
 
 
 class NERExtractor:
-    """Named entity recognition using spaCy."""
+    """Named entity recognition using spaCy.
 
-    def __init__(self) -> None:
+    The pipeline is loaded on first use. Missing spaCy or a missing model
+    raise ``RuntimeError`` so the consolidation pipeline can degrade
+    gracefully (it then simply skips entity extraction).
+    """
+
+    def __init__(
+        self,
+        model: str = SPACY_MODEL,
+        labels: Iterable[str] | None = None,
+    ) -> None:
+        self._model_name = model
+        self._labels = {label.upper() for label in labels} if labels is not None else None
         self._nlp = None
 
     def _load(self):
         if self._nlp is None:
-            import spacy
             try:
-                self._nlp = spacy.load("en_core_web_sm")
-            except OSError:
+                import spacy
+            except ImportError as exc:
                 raise RuntimeError(
-                    "spaCy model 'en_core_web_sm' not found. "
-                    "Install with: python -m spacy download en_core_web_sm"
-                )
+                    "spaCy is not installed; entity extraction is unavailable."
+                ) from exc
+            try:
+                self._nlp = spacy.load(self._model_name)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"spaCy model '{self._model_name}' not found. Install it with: "
+                    f"python -m spacy download {self._model_name}"
+                ) from exc
+        return self._nlp
 
     def extract(self, text: str) -> list[ExtractedEntity]:
-        """Extract named entities from text."""
-        self._load()
-        doc = self._nlp(text)
+        """Extract named entities from ``text`` (restricted to the configured labels)."""
+        nlp = self._load()
+        allowed = self._labels
         entities: list[ExtractedEntity] = []
         seen: set[str] = set()
-        for ent in doc.ents:
+        for ent in nlp(text).ents:
+            if allowed is not None and ent.label_ not in allowed:
+                continue
             key = f"{ent.text.lower()}:{ent.label_}"
-            if key not in seen:
-                seen.add(key)
-                entities.append(ExtractedEntity(
-                    text=ent.text,
-                    label=ent.label_,
-                    start=ent.start_char,
-                    end=ent.end_char,
-                ))
+            if key in seen:
+                continue
+            seen.add(key)
+            entities.append(ExtractedEntity(
+                text=ent.text,
+                label=ent.label_,
+                start=ent.start_char,
+                end=ent.end_char,
+            ))
         return entities
 
     def extract_from_messages(
@@ -54,20 +77,15 @@ class NERExtractor:
         messages: list[str],
         message_offset: int = 0,
     ) -> list[ExtractedEntity]:
-        """Extract entities from multiple messages, deduplicating."""
+        """Extract entities from several messages, deduplicating across them."""
         all_entities: list[ExtractedEntity] = []
         seen: set[str] = set()
         for i, msg in enumerate(messages):
-            msg_index = message_offset + i
             for ent in self.extract(msg):
                 key = f"{ent.text.lower()}:{ent.label}"
-                if key not in seen:
-                    seen.add(key)
-                    all_entities.append(ExtractedEntity(
-                        text=ent.text,
-                        label=ent.label,
-                        start=ent.start,
-                        end=ent.end,
-                        message_index=msg_index,
-                    ))
+                if key in seen:
+                    continue
+                seen.add(key)
+                ent.message_index = message_offset + i
+                all_entities.append(ent)
         return all_entities

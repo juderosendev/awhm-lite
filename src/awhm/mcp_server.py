@@ -1,11 +1,11 @@
-"""AWHM Lite MCP Server — exposes memory tools to Claude Code."""
+"""AWHM Lite MCP server: exposes the memory system as tools for Claude Code."""
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
-from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
@@ -28,10 +28,9 @@ def _get_session() -> AWHMSession:
     """Get or create the global AWHM session."""
     global _session
     if _session is None:
-        import os
         data_dir = os.environ.get("AWHM_DATA_DIR", "~/.awhm")
         use_mock = os.environ.get("AWHM_MOCK_EMBEDDINGS", "").lower() in ("1", "true")
-        config = AWHMConfig(data_dir=os.path.expanduser(data_dir))
+        config = AWHMConfig(data_dir=data_dir)
         _session = AWHMSession.start_session(
             config, use_mock_embeddings=use_mock,
         )
@@ -89,10 +88,14 @@ async def memory_log(role: str, content: str) -> str:
         role: One of "user", "assistant", "tool_call", "tool_result".
         content: The message content to log.
     """
+    try:
+        role_enum = Role(role.lower().strip())
+    except ValueError:
+        valid = ", ".join(r.value for r in Role)
+        return f"Invalid role {role!r}. Expected one of: {valid}."
     session = _get_session()
-    session.log_message(role, content)
-    buffer_entries = session.buffer.entries
-    return f"Logged. Buffer now has {len(buffer_entries)} entries."
+    session.log_message(role_enum, content)
+    return f"Logged. Buffer now has {len(session.buffer)} entries."
 
 
 @mcp.tool()

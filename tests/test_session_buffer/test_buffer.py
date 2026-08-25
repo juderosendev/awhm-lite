@@ -44,3 +44,15 @@ def test_clear():
     assert len(buf.entries) > 0
     buf.clear()
     assert len(buf.entries) == 0
+
+
+def test_remove_where():
+    buf = SessionBuffer()
+    buf.process_message("I prefer dark mode", "2024-01-01T00:00:00Z", 0)
+    buf.process_message("Actually, it should be port 8080", "2024-01-01T00:01:00Z", 1)
+    before = buf.version
+    removed = buf.remove_where(lambda e: e.source_msg == 0)
+    assert removed == 1
+    assert len(buf) == 1
+    assert buf.version > before
+    assert buf.remove_where(lambda e: False) == 0

@@ -1,4 +1,4 @@
-"""CLI for AWHM Lite: status, snapshot, consolidate, delete, query."""
+"""CLI for AWHM Lite: status, query, consolidate, snapshot, delete, eval."""
 
 from __future__ import annotations
 
@@ -129,7 +129,7 @@ def cmd_eval(args):
 def main():
     parser = argparse.ArgumentParser(
         prog="awhm",
-        description="AWHM Lite — External memory system for LLMs",
+        description="AWHM Lite: external memory for LLM agents",
     )
     parser.add_argument(
         "--data-dir", default="~/.awhm",

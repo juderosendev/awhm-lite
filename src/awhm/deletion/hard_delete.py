@@ -1,4 +1,4 @@
-"""Hard deletion: cascade delete across graph, logs, buffer."""
+"""Hard deletion: cascade a node's removal across graph, logs, buffer and snapshots."""
 
 from __future__ import annotations
 
@@ -37,12 +37,14 @@ def hard_delete(
     buffer: SessionBuffer | None = None,
     current_session_id: str | None = None,
 ) -> DeletionResult:
-    """Hard-delete a node and all associated data for privacy compliance.
+    """Hard-delete a node and everything derived from or feeding it.
 
-    1. Delete node from graph
-    2. Sever all incident edges
-    3. Delete corresponding raw log entries
-    4. Delete from session buffer if present
+    1. Remove the node and its incident edges from the graph
+    2. Remove the raw log messages it was extracted from (by source refs when
+       available, else by exact content match)
+    3. Remove matching session-buffer entries
+    4. Scrub the node from existing snapshots
+    5. Record a tombstone and a ledger entry for auditability
     """
     result = DeletionResult(
         node_deleted=False,
@@ -57,109 +59,86 @@ def hard_delete(
         ledger_record_id=None,
     )
 
-    # Get node info before deletion
     node = graph.get_node(node_id)
     if node is None:
         return result
 
     content = node.content
-    source_sessions = node.source_sessions
+    source_sessions = list(node.source_sessions)
     source_refs = _normalize_source_refs(node.source_refs)
 
-    # Count incident edges before deletion.
     result.edges_removed = len(graph.get_edges_for_node(node_id))
+    result.node_deleted = graph.remove_node(node_id) is not None
 
-    # 1. Remove node (also removes edges)
-    removed = graph.remove_node(node_id)
-    if removed:
-        result.node_deleted = True
-
-    # 3. Delete from raw logs
+    # Raw logs
     reader = RawLogReader(config)
     sessions_affected: set[str] = set()
-    total_by_refs = 0
     refs_by_session: dict[str, set[int]] = {}
     for ref in source_refs:
-        refs_by_session.setdefault(ref["session_id"], set()).add(ref["message_index"])
+        refs_by_session.setdefault(str(ref["session_id"]), set()).add(int(ref["message_index"]))
 
     if refs_by_session:
         result.match_strategy = "source_refs"
         for session_id, indices in refs_by_session.items():
             count = reader.hard_delete_entries_by_indices(session_id, indices)
-            if count > 0:
+            if count:
                 sessions_affected.add(session_id)
-            total_by_refs += count
-        result.log_entries_removed += total_by_refs
+            result.log_entries_removed += count
     else:
         result.match_strategy = "exact_content"
         for session_id in source_sessions:
             count = reader.hard_delete_entries_exact(session_id, content)
-            if count > 0:
+            if count:
                 sessions_affected.add(session_id)
             result.log_entries_removed += count
         result.exact_matches_removed = result.log_entries_removed
 
-    # 4. Delete from buffer
-    if buffer:
-        before = len(buffer.entries)
-        if current_session_id:
-            source_msg_ids = {
-                ref["message_index"]
-                for ref in source_refs
-                if ref["session_id"] == current_session_id
-            }
-        else:
-            source_msg_ids = set()
-
+    # Session buffer
+    if buffer is not None:
+        source_msg_ids = {
+            int(ref["message_index"])
+            for ref in source_refs
+            if current_session_id and ref["session_id"] == current_session_id
+        }
         if source_msg_ids:
-            buffer._entries = [
-                e for e in buffer._entries
-                if e.source_msg not in source_msg_ids
-            ]
+            result.buffer_entries_removed = buffer.remove_where(
+                lambda e: e.source_msg in source_msg_ids
+            )
         else:
-            target_norm = _normalize_text(content)
-            buffer._entries = [
-                e for e in buffer._entries
-                if _normalize_text(e.content) != target_norm
-            ]
-        result.buffer_entries_removed = before - len(buffer._entries)
+            target = _normalize_text(content)
+            result.buffer_entries_removed = buffer.remove_where(
+                lambda e: _normalize_text(e.content) == target
+            )
 
     result.affected_sessions = sorted(sessions_affected)
 
     if config.delete_snapshots_on_hard_delete:
         result.snapshots_touched = _scrub_snapshots(config, node_id, content)
 
+    stamp = datetime.now(timezone.utc).isoformat()
     result.tombstone_id = str(uuid.uuid4())
     result.ledger_record_id = str(uuid.uuid4())
-    _append_jsonl(
-        config.deletion_tombstones_path,
-        {
-            "tombstone_id": result.tombstone_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "node_id": node_id,
-            "content_hash_hint": _normalize_text(content)[:64],
-            "affected_sessions": result.affected_sessions,
-            "match_strategy": result.match_strategy,
-        },
-    )
-    _append_jsonl(
-        config.deletion_ledger_path,
-        {
-            "record_id": result.ledger_record_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "node_id": node_id,
-            "node_deleted": result.node_deleted,
-            "edges_removed": result.edges_removed,
-            "log_entries_removed": result.log_entries_removed,
-            "buffer_entries_removed": result.buffer_entries_removed,
-            "snapshots_touched": result.snapshots_touched,
-            "tombstone_id": result.tombstone_id,
-        },
-    )
+    _append_jsonl(config.deletion_tombstones_path, {
+        "tombstone_id": result.tombstone_id,
+        "timestamp": stamp,
+        "node_id": node_id,
+        "content_hash_hint": _normalize_text(content)[:64],
+        "affected_sessions": result.affected_sessions,
+        "match_strategy": result.match_strategy,
+    })
+    _append_jsonl(config.deletion_ledger_path, {
+        "record_id": result.ledger_record_id,
+        "timestamp": stamp,
+        "node_id": node_id,
+        "node_deleted": result.node_deleted,
+        "edges_removed": result.edges_removed,
+        "log_entries_removed": result.log_entries_removed,
+        "buffer_entries_removed": result.buffer_entries_removed,
+        "snapshots_touched": result.snapshots_touched,
+        "tombstone_id": result.tombstone_id,
+    })
 
-    # Save updated graph
     save_graph(graph, config)
-
     return result
 
 
@@ -174,17 +153,15 @@ def _normalize_source_refs(refs: list[dict[str, Any]]) -> list[dict[str, int | s
         if not isinstance(ref, dict):
             continue
         session_id = ref.get("session_id")
-        msg_idx = ref.get("message_index")
         if not isinstance(session_id, str):
             continue
         try:
-            idx = int(msg_idx)
+            idx = int(ref.get("message_index"))  # type: ignore[arg-type]
         except (TypeError, ValueError):
             continue
-        key = (session_id, idx)
-        if key in seen:
+        if (session_id, idx) in seen:
             continue
-        seen.add(key)
+        seen.add((session_id, idx))
         normalized.append({"session_id": session_id, "message_index": idx})
     return normalized
 
@@ -196,34 +173,30 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
 
 
 def _scrub_snapshots(config: AWHMConfig, node_id: str, content: str) -> int:
+    """Remove the node (by id or identical content) from every snapshot on disk."""
     snapshots_dir = config.snapshots_dir
     if not snapshots_dir.exists():
         return 0
 
-    target_norm = _normalize_text(content)
+    target = _normalize_text(content)
     touched = 0
-
     for snapshot in snapshots_dir.glob("snapshot_*.json"):
-        with open(snapshot, "r", encoding="utf-8") as f:
+        with open(snapshot, encoding="utf-8") as f:
             data = json.load(f)
 
         changed = False
         graph_data = data.get("graph", {})
         nodes = graph_data.get("nodes", {})
-        edges = graph_data.get("edges", [])
-
         if isinstance(nodes, dict):
-            remove_ids: set[str] = set()
-            if node_id in nodes:
-                remove_ids.add(node_id)
-            for nid, node in list(nodes.items()):
-                if not isinstance(node, dict):
-                    continue
-                if _normalize_text(str(node.get("content", ""))) == target_norm:
-                    remove_ids.add(nid)
+            remove_ids = {
+                nid for nid, node in nodes.items()
+                if nid == node_id
+                or (isinstance(node, dict) and _normalize_text(str(node.get("content", ""))) == target)
+            }
             if remove_ids:
                 for rid in remove_ids:
                     nodes.pop(rid, None)
+                edges = graph_data.get("edges", [])
                 if isinstance(edges, list):
                     graph_data["edges"] = [
                         e for e in edges
@@ -233,16 +206,14 @@ def _scrub_snapshots(config: AWHMConfig, node_id: str, content: str) -> int:
 
         wal_state = data.get("wal_state")
         if isinstance(wal_state, list):
-            kept_wal = []
-            for entry in wal_state:
-                if not isinstance(entry, dict):
-                    kept_wal.append(entry)
-                    continue
-                if _normalize_text(str(entry.get("content", ""))) == target_norm:
-                    changed = True
-                    continue
-                kept_wal.append(entry)
-            data["wal_state"] = kept_wal
+            kept = [
+                entry for entry in wal_state
+                if not (isinstance(entry, dict)
+                        and _normalize_text(str(entry.get("content", ""))) == target)
+            ]
+            if len(kept) != len(wal_state):
+                data["wal_state"] = kept
+                changed = True
 
         if changed:
             tmp = snapshot.with_suffix(".tmp")
@@ -250,5 +221,4 @@ def _scrub_snapshots(config: AWHMConfig, node_id: str, content: str) -> int:
                 json.dump(data, f, indent=2)
             tmp.replace(snapshot)
             touched += 1
-
     return touched

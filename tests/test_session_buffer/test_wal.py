@@ -47,3 +47,14 @@ def test_session_scoped_recovery(config):
     assert count_s1 == 1
     assert len(recovered_s1.entries) == 1
     assert "dark mode" in recovered_s1.entries[0].content.lower()
+
+
+def test_flush_skips_when_unchanged(config):
+    buf = SessionBuffer()
+    buf.process_message("I prefer dark mode", "2024-01-01T00:00:00Z", 0)
+    wal = WALManager(config, buf, session_id="s1")
+    assert wal.flush() is True
+    assert wal.flush() is False
+    buf.process_message("Actually, use port 8080", "2024-01-01T00:01:00Z", 1)
+    assert wal.flush() is True
+    assert wal.flush(force=True) is True

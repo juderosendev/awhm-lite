@@ -1,4 +1,4 @@
-"""WALManager: 30s flush via background thread, crash recovery."""
+"""WALManager: periodic buffer flush on a background timer, plus crash recovery."""
 
 from __future__ import annotations
 
@@ -12,7 +12,12 @@ from .models import BufferEntry
 
 
 class WALManager:
-    """Write-ahead log for session buffer. Full-state overwrite every flush_interval."""
+    """Write-ahead log for the session buffer.
+
+    Each flush atomically overwrites the session's WAL file with the full
+    buffer state. Flushes are skipped when the buffer has not changed since
+    the last write.
+    """
 
     def __init__(
         self,
@@ -26,6 +31,7 @@ class WALManager:
         self._timer: threading.Timer | None = None
         self._lock = threading.Lock()
         self._running = False
+        self._last_flushed_version: int | None = None
         config.ensure_dirs()
 
     @property
@@ -40,43 +46,50 @@ class WALManager:
     def stop(self) -> None:
         """Stop periodic flushing and do a final flush."""
         self._running = False
-        if self._timer is not None:
-            self._timer.cancel()
-            self._timer = None
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
         self.flush()
 
-    def flush(self) -> None:
-        """Write current buffer state to WAL (atomic)."""
+    def flush(self, force: bool = False) -> bool:
+        """Write the buffer to the WAL. Returns True if a write happened."""
         with self._lock:
+            version = self.buffer.version
+            if not force and version == self._last_flushed_version:
+                return False
             data = self.buffer.to_dicts()
             tmp_path = self.wal_path.with_suffix(".tmp")
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f)
             tmp_path.replace(self.wal_path)
+            self._last_flushed_version = version
+            return True
 
     def recover(self) -> int:
-        """Recover buffer entries from WAL file. Returns count recovered."""
+        """Load buffer entries from an existing WAL file. Returns count recovered."""
         if not self.wal_path.exists():
             return 0
-        with open(self.wal_path, "r", encoding="utf-8") as f:
+        with open(self.wal_path, encoding="utf-8") as f:
             data = json.load(f)
-        count = 0
         for d in data:
             self.buffer.add_entry(BufferEntry.from_dict(d))
-            count += 1
-        return count
+        return len(data)
 
     def clear_wal(self) -> None:
         """Remove the WAL file."""
         if self.wal_path.exists():
             self.wal_path.unlink()
+        self._last_flushed_version = None
 
     def _schedule_flush(self) -> None:
         if not self._running:
             return
-        self._timer = threading.Timer(self.config.buffer_flush_interval, self._periodic_flush)
-        self._timer.daemon = True
-        self._timer.start()
+        timer = threading.Timer(self.config.buffer_flush_interval, self._periodic_flush)
+        timer.daemon = True
+        with self._lock:
+            self._timer = timer
+        timer.start()
 
     def _periodic_flush(self) -> None:
         self.flush()

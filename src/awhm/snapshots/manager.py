@@ -42,7 +42,7 @@ class SnapshotManager:
     def restore(self, snapshot_path: Path | str) -> tuple[MemoryGraph, list[dict]]:
         """Restore graph and WAL state from a snapshot."""
         path = Path(snapshot_path)
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
 
         graph = MemoryGraph.from_dict(data["graph"])

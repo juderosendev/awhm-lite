@@ -45,3 +45,17 @@ def test_cosine_similarity_matrix():
     sims = cosine_similarity_matrix(query, matrix)
     assert abs(sims[0] - 1.0) < 1e-5
     assert abs(sims[1]) < 1e-5
+
+
+def test_mock_deterministic_across_processes():
+    import json
+    import subprocess
+    import sys
+
+    code = (
+        "import json; from awhm.retrieval.embedding import MockEmbeddingService; "
+        "print(json.dumps(MockEmbeddingService(dim=8).encode_single('hello').tolist()))"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    other = np.array(json.loads(out.stdout))
+    assert np.allclose(other, MockEmbeddingService(dim=8).encode_single("hello"), atol=1e-6)
