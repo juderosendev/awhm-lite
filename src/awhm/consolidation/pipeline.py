@@ -30,6 +30,7 @@ from ..retrieval.embedding import EmbeddingService
 from ..types import EdgeType, NodeStatus, NodeType
 from .canonical import canonical_key_for_content, correction_supersedes, is_correction
 from .deduplication import find_duplicates, first_occurrences, statement_key
+from .entities import EntityResolver
 from .entity_linking import find_links
 from .extraction import extract_from_log_entries
 from .ner import NERExtractor
@@ -44,6 +45,7 @@ CONFIDENCE_BY_EXTRACTION = {
     "outcome": 0.65,
 }
 CONFIDENCE_NER = 0.75
+ENTITY_MENTION_WEIGHT = 0.8
 
 NODE_TYPE_BY_EXTRACTION = {
     "correction": NodeType.SEMANTIC.value,
@@ -224,18 +226,6 @@ class Stage1Pipeline:
         contents = [c.content for c in candidates]
         embeddings = self.embedding.encode(contents)
 
-        # Entity linking: NER candidates that match an existing node are not
-        # re-added; instead the new context gets an association edge to it.
-        ner_candidates = [c for c in candidates if c.source == "ner"]
-        links = find_links(
-            [c.entity_text or "" for c in ner_candidates],
-            self.graph,
-            self.embedding,
-            threshold=self.config.entity_link_threshold,
-            entity_labels=[c.entity_label or "" for c in ner_candidates],
-        )
-        linked_entities = {lc.entity_text.lower() for lc in links}
-
         # Near-duplicates reinforce the existing node instead of creating a new one.
         duplicates = find_duplicates(
             contents, embeddings, self.graph, threshold=self.config.dedup_threshold,
@@ -251,46 +241,44 @@ class Stage1Pipeline:
                 existing.access_count += 1
             refs = [c.refs for c in candidates if c.content == dc.new_content]
             self._merge_source_refs(existing, [r for rs in refs for r in rs])
+            self.graph.mark_dirty(existing.id)
 
         new_count = 0
         prev_episodic_id: str | None = None
-        created_by_entity: dict[str, list[str]] = {}
+        new_entity_nodes: list[MemoryNode] = []
+        new_statement_nodes: list[MemoryNode] = []
+
+        # Entities first, resolved one at a time against the graph as it
+        # grows, so two spellings in the same session still yield one node.
+        resolver = EntityResolver(self.graph, self.embedding, self.config, link_fn=find_links)
+        resolved_entities: dict[str, MemoryNode] = {}
+        for i, cand in enumerate(candidates):
+            if cand.source != "ner" or cand.content in duplicate_contents:
+                continue
+            existing = resolver.resolve(cand.entity_text or "", cand.entity_label)
+            if existing is not None:
+                resolver.register_alias(existing, cand.entity_text or "")
+                if session_id not in existing.source_sessions:
+                    existing.source_sessions.append(session_id)
+                self._merge_source_refs(existing, cand.refs)
+                self.graph.mark_dirty(existing.id)
+                resolved_entities[(cand.entity_text or "").lower()] = existing
+                continue
+            node = self._new_node(cand, embeddings[i], key=None, superseded=[], now_iso=now_iso)
+            self.graph.add_node(node)
+            new_entity_nodes.append(node)
+            new_count += 1
 
         for i, cand in enumerate(candidates):
-            if cand.content in duplicate_contents:
-                continue
-            if cand.source == "ner" and (cand.entity_text or "").lower() in linked_entities:
+            if cand.source == "ner" or cand.content in duplicate_contents:
                 continue
 
             key = canonical_key_for_content(cand.content, cand.node_type)
             superseded = self._supersede(cand, key, now_iso)
-
-            node = MemoryNode(
-                id=str(uuid.uuid4()),
-                type=cand.node_type,
-                content=cand.content,
-                embedding=embeddings[i].tolist(),
-                embed_model=self.config.embed_model,
-                strength=StrengthScore(recency=1.0, frequency=1, composite=1.0),
-                created_at=now_iso,
-                last_accessed=now_iso,
-                source_sessions=[session_id],
-                source_refs=list(cand.refs),
-                access_count=1,
-                canonical_key=key,
-                status=NodeStatus.ACTIVE.value,
-                supersedes=superseded,
-                valid_from=cand.valid_from or now_iso,
-                valid_to=cand.valid_to,
-                confidence=cand.confidence,
-                entity_type=cand.entity_label,
-                mentioned_dates=list(cand.mentioned_dates),
-            )
+            node = self._new_node(cand, embeddings[i], key=key, superseded=superseded, now_iso=now_iso)
             self.graph.add_node(node)
+            new_statement_nodes.append(node)
             new_count += 1
-
-            if cand.source == "ner" and cand.entity_text:
-                created_by_entity.setdefault(cand.entity_text.lower(), []).append(node.id)
 
             if cand.node_type == NodeType.EPISODIC.value:
                 if prev_episodic_id is not None:
@@ -303,18 +291,52 @@ class Stage1Pipeline:
                     ))
                 prev_episodic_id = node.id
 
-        for lc in links:
-            for source_id in created_by_entity.get(lc.entity_text.lower(), []):
-                if source_id != lc.matched_node_id:
+        # Statements attach to the entities they mention (new or resolved), so
+        # "what do we know about Acme?" can walk from the entity to its facts.
+        entity_pool = list(resolved_entities.values()) + new_entity_nodes
+        if entity_pool:
+            for node in new_statement_nodes:
+                for entity in resolver.mentions(node.content, entity_pool):
                     self.graph.add_edge(MemoryEdge(
-                        source=source_id,
-                        target=lc.matched_node_id,
+                        source=node.id,
+                        target=entity.id,
                         type=EdgeType.ASSOCIATION.value,
-                        weight=lc.embedding_sim,
+                        weight=ENTITY_MENTION_WEIGHT,
                         created_at=now_iso,
                     ))
 
         return new_count
+
+    def _new_node(
+        self,
+        cand: Candidate,
+        embedding: Any,
+        *,
+        key: str | None,
+        superseded: list[str],
+        now_iso: str,
+    ) -> MemoryNode:
+        return MemoryNode(
+            id=str(uuid.uuid4()),
+            type=cand.node_type,
+            content=cand.content,
+            embedding=[float(x) for x in embedding],
+            embed_model=self.config.embed_model,
+            strength=StrengthScore(recency=1.0, frequency=1, composite=1.0),
+            created_at=now_iso,
+            last_accessed=now_iso,
+            source_sessions=[cand.session_id],
+            source_refs=list(cand.refs),
+            access_count=1,
+            canonical_key=key,
+            status=NodeStatus.ACTIVE.value,
+            supersedes=superseded,
+            valid_from=cand.valid_from or now_iso,
+            valid_to=cand.valid_to,
+            confidence=cand.confidence,
+            entity_type=cand.entity_label,
+            mentioned_dates=list(cand.mentioned_dates),
+        )
 
     def _supersede(self, cand: Candidate, key: str | None, now_iso: str) -> list[str]:
         """Mark active nodes contradicted by ``cand`` as superseded. Returns their ids."""
@@ -335,6 +357,7 @@ class Stage1Pipeline:
             ):
                 node.status = NodeStatus.SUPERSEDED.value
                 node.valid_to = now_iso
+                self.graph.mark_dirty(node.id)
                 superseded.append(node.id)
         return superseded
 

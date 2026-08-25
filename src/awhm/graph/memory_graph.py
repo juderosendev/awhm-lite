@@ -32,6 +32,9 @@ class MemoryGraph:
         self._dirty = True
         self.version = 0
         self.content_version = 0
+        self._dirty_nodes: set[str] = set()
+        self._removed_nodes: set[str] = set()
+        self._edges_dirty = False
 
     # ── Change tracking ────────────────────────────────────────
 
@@ -41,10 +44,28 @@ class MemoryGraph:
             self.content_version += 1
             self._dirty = True
 
+    def mark_dirty(self, node_id: str) -> None:
+        """Record that ``node_id`` changed in place and must be persisted."""
+        if node_id in self.nodes:
+            self._dirty_nodes.add(node_id)
+            self.version += 1
+
+    def mark_all_dirty(self) -> None:
+        self._dirty_nodes = set(self.nodes)
+        self._edges_dirty = True
+
+    def consume_changes(self) -> tuple[set[str], set[str], bool]:
+        """Return ``(dirty_node_ids, removed_node_ids, edges_dirty)`` and reset them."""
+        changes = (self._dirty_nodes, self._removed_nodes, self._edges_dirty)
+        self._dirty_nodes, self._removed_nodes, self._edges_dirty = set(), set(), False
+        return changes
+
     # ── Node CRUD ──────────────────────────────────────────────
 
     def add_node(self, node: MemoryNode) -> None:
         self.nodes[node.id] = node
+        self._dirty_nodes.add(node.id)
+        self._removed_nodes.discard(node.id)
         self._touch(content_changed=True)
 
     def get_node(self, node_id: str) -> MemoryNode | None:
@@ -55,6 +76,8 @@ class MemoryGraph:
         if node is None:
             return None
         self.remove_edges_for_node(node_id)
+        self._dirty_nodes.discard(node_id)
+        self._removed_nodes.add(node_id)
         self._touch(content_changed=True)
         return node
 
@@ -66,6 +89,7 @@ class MemoryGraph:
         stamp = (now or datetime.now(timezone.utc)).isoformat()
         node.last_accessed = stamp
         node.access_count += 1
+        self._dirty_nodes.add(node_id)
         self._touch()
 
     # ── Edge CRUD ──────────────────────────────────────────────
@@ -75,6 +99,7 @@ class MemoryGraph:
         self._edges_by_node[edge.source].append(edge)
         if edge.target != edge.source:
             self._edges_by_node[edge.target].append(edge)
+        self._edges_dirty = True
         self._touch()
 
     def get_edges_for_node(self, node_id: str) -> list[MemoryEdge]:
@@ -92,6 +117,7 @@ class MemoryGraph:
                 self._edges_by_node[other] = [
                     e for e in self._edges_by_node.get(other, []) if id(e) not in doomed
                 ]
+        self._edges_dirty = True
         self._touch()
         return len(incident)
 
@@ -154,5 +180,6 @@ class MemoryGraph:
             g.nodes[nid] = MemoryNode.from_dict(nd)
         for ed in data.get("edges", []):
             g.add_edge(MemoryEdge.from_dict(ed))
+        g.mark_all_dirty()
         g._touch(content_changed=True)
         return g

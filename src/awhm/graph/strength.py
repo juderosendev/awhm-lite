@@ -61,6 +61,7 @@ class StrengthScorer:
             node.strength.recency = s_rec
             node.strength.frequency = node.access_count
             node.strength.composite = self.config.w_rec * s_rec + self.config.w_freq * s_freq
+            graph.mark_dirty(node.id)
 
     def update_all(self, graph: MemoryGraph, now: datetime | None = None) -> None:
         """Recompute strength scores for every node in the graph."""
