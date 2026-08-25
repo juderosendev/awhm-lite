@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.3.0 (August 2026)
+
+The seven highest-leverage improvements identified after the 0.2.0 cleanup.
+Same architecture; the graph gains two fields (`aliases`, `mentioned_dates`)
+and old files load unchanged.
+
+### Added
+- **Claude Code hooks** (`awhm hook prompt|stop|session-end|settings`):
+  memory on every turn without the model calling a tool. Sessions resume
+  across hook processes via the write-ahead log; `RawLogger` continues
+  message numbering from the existing file. `AWHMSession.suspend()`.
+- **Stage 2 LLM refinement**: an LLM proposes the memories the rules missed;
+  code validates provenance, confidence and duplicates and commits through
+  the normal slot rules. `AnthropicClient` (structured outputs, refusal
+  fallback), `MockLLMClient`, `LLMClient` protocol, `[stage2]` extra,
+  `awhm consolidate --stage2`. Retrieval stays zero-LLM.
+- **Real-corpus evaluation**: `awhm eval --corpus` replays sessions and
+  scores questions (Recall@k, nDCG@k, contradiction rate, latency,
+  per-category); `--longmemeval` loads LongMemEval with per-instance isolation.
+- **Entity resolution**: normalised surface forms, alias matching,
+  unambiguous containment, embedding fallback; aliases accumulate on the node;
+  statements link to the entities they mention.
+- **Time travel**: `query(as_of=...)`, `awhm query --as-of`, MCP `as_of`.
+  Dates introduced with from/since/until set the fact's validity window and
+  are kept as `mentioned_dates`; "Date reference" nodes are gone.
+- **Neighbour expansion**: anchors pull in one-hop graph neighbours with a
+  decayed edge weight (`neighbor_expansion`, `neighbor_decay`,
+  `w_association`). Only current anchors expand.
+- **SQLite storage** (`storage_backend="sqlite"`): one row per node, saves
+  write only what changed; imports an existing JSON graph on first load.
+- `query(semantic=False)` for embedding-free retrieval.
+
+### Changed
+- Lexical anchors use a relative threshold (`bm25_anchor_ratio`) instead of
+  an absolute BM25 floor that tiny corpora could never reach.
+- `bm25_threshold` removed.
+
 ## 0.2.0 (August 2026)
 
 Cleanup and hardening pass. Same architecture, same on-disk formats; existing

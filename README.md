@@ -6,7 +6,7 @@ External long-term memory for LLM agents. No cloud, no API keys, runs entirely l
 
 AWHM Lite gives any LLM persistent memory across conversations through append-only logging, regex-based pattern matching, a contradiction-aware memory graph, symbolic consolidation (zero LLM calls), and retrieval via lexical + semantic feature fusion.
 
-**Status:** research prototype. Built February 2026, published August 2026, cleaned up and hardened in v0.2.0. Working and tested (113 tests, CI on Python 3.11 to 3.13); not under active development.
+**Status:** research prototype. Built February 2026, published August 2026; v0.2.0 hardened it, v0.3.0 added hooks, Stage 2, entity resolution, time travel, SQLite storage and real-corpus evaluation. 145 tests, CI on Python 3.11 to 3.13.
 
 ## Project docs
 
@@ -56,6 +56,9 @@ python -m spacy download en_core_web_sm
 
 # Claude Code MCP integration
 pip install -e ".[mcp]"
+
+# Stage 2 (optional LLM refinement during consolidation)
+pip install -e ".[stage2]"
 ```
 
 `sentence-transformers` is optional because it pulls in PyTorch. Without it, start
@@ -134,6 +137,25 @@ awhm snapshot restore --path FILE  # Restore from snapshot
 awhm delete NODE_ID                # Hard-delete a node (privacy)
 awhm eval --json                   # Run built-in benchmark report
 ```
+
+## Claude Code integration (hooks, recommended)
+
+With hooks, memory works on every turn without the model having to call a tool.
+Each hook is a separate short-lived process; the session buffer is resumed from
+its write-ahead log between them.
+
+| Event | Command | What it does |
+|-------|---------|--------------|
+| `UserPromptSubmit` | `awhm hook prompt` | Logs the prompt, retrieves the top memories (BM25 + buffer; add `--semantic` to also use embeddings) and returns them as hidden context |
+| `Stop` | `awhm hook stop` | Logs the assistant's reply |
+| `SessionEnd` | `awhm hook session-end` | Consolidates the session into the graph |
+
+```bash
+awhm hook settings          # prints the block to merge into ~/.claude/settings.json
+```
+
+Hooks never block a session: any failure is written to stderr and the process
+exits 0. Set `AWHM_DATA_DIR` to change where memory lives.
 
 ## Claude Code integration (MCP)
 
@@ -242,6 +264,35 @@ Rules, deliberately conservative because there is no LLM to judge intent:
 - **Fact family**: only an exact key match supersedes, so a correction about the API endpoint can never clobber your name.
 - Anything not recognised gets no key and never supersedes.
 
+### Entities
+Named entities resolve to one node however they are written. Surface forms are
+normalised (case, possessives, corporate suffixes, domains: "Acme Holdings Ltd"
+and "acme.com" both become "acme"), then matched by exact alias, by unambiguous
+token containment ("Acme" inside "Acme Holdings"), and finally by embedding
+similarity with the same entity type. Every resolved mention is recorded as an
+alias on the node, and statements get association edges to the entities they
+mention, so retrieval can walk from "Acme" to everything known about it.
+
+### Stage 2 (optional LLM refinement)
+Stage 1 has a hard ceiling: it catches "I prefer Rust" and misses "let's go with
+Rust then". Stage 2 runs after Stage 1, offline, and asks an LLM to propose the
+memories the rules did not find. The LLM only proposes: code validates every
+proposal (schema, cited message numbers must exist, confidence floor), drops
+anything already captured, and commits through the same slot and supersession
+rules. Retrieval stays zero-LLM.
+
+```python
+from awhm import AWHMSession, AWHMConfig, AnthropicClient
+
+config = AWHMConfig(stage2_enabled=True, stage2_model="claude-opus-5")
+with AWHMSession.start_session(config, llm_client=AnthropicClient()) as session:
+    ...
+    session.consolidate_current()
+```
+
+Or from the CLI: `awhm consolidate --stage2`. Any object with a
+`complete_json(system, user, schema) -> str` method works as a client.
+
 ### Retrieval
 Zero LLM calls. Feature-based fusion:
 
@@ -250,24 +301,39 @@ Zero LLM calls. Feature-based fusion:
 3. **History filter**: by default, only `status=active` graph nodes are eligible
 4. **Feature scoring**: semantic similarity + lexical score + strength + confidence, minus a contradiction penalty. Strength is recomputed only for the candidates being ranked.
 5. Return top-k (default 10)
-6. **Cold-start fallback**: for the first ~10 sessions, also runs BM25 over raw logs. Those hits are scaled into `[0, raw_log_score_scale]` so they never outrank a real graph match.
+6. **Neighbour expansion**: one-hop neighbours of the anchors (linked entities, sequential episodes) join the candidate set with a decayed edge weight, scored via the `association` feature. Only anchors that are themselves current may expand.
+7. **Cold-start fallback**: for the first ~10 sessions, also runs BM25 over raw logs. Those hits are scaled into `[0, raw_log_score_scale]` so they never outrank a real graph match.
+
+### Time travel
+Facts carry a validity window. Dates introduced with "from"/"since" set
+`valid_from`, "until" sets `valid_to`, and a supersession closes the older
+fact's window. `query(..., as_of="2026-03-01")` answers with what was true at
+that moment, superseded memories included:
+
+```bash
+awhm query "API endpoint"                       # what is true now
+awhm query "API endpoint" --as-of 2026-02-01    # what was true then
+```
 
 Set `include_history=True` to surface superseded/retracted memories.
 
 Use `with_trace=True` to return per-result ranking feature traces.
 
-### Built-in benchmark
-Run the built-in replay benchmark to measure:
-- `Recall@k`
-- `nDCG@k`
-- contradiction error rate
-- p50/p95 query latency
-- deletion audit pass/fail (graph/log/snapshot/query checks)
+### Evaluation
+The built-in benchmark is a synthetic smoke test (three correction-heavy
+queries plus a deletion audit). Real numbers come from replaying a corpus:
 
 ```bash
-awhm eval
-awhm eval --json
+awhm eval                                            # built-in synthetic benchmark
+awhm eval --corpus my_sessions.json                  # native format, see below
+awhm eval --corpus longmemeval_s.json --longmemeval --limit 50
 ```
+
+Both report `Recall@k`, `nDCG@k`, contradiction error rate, p50/p95 latency and
+per-category recall. The native corpus format is `{"sessions": [{"id", "messages": [{"role", "content"}]}], "questions": [{"id", "question", "expected": [...], "forbidden": [...], "as_of", "category"}]}`.
+LongMemEval instances are consolidated and questioned in isolation, matching
+the benchmark protocol. Matching is by answer substring, a deliberate lower
+bound: paraphrased hits are not counted.
 
 ## Configuration
 
@@ -293,10 +359,14 @@ All parameters are configurable via `AWHMConfig`:
 | `bm25_anchor_ratio` | 0.5 | Lexical anchor if score >= ratio x best BM25 score |
 | `embed_threshold` | 0.3 | Minimum cosine sim for anchor set |
 | `raw_log_score_scale` | 0.5 | Upper bound for cold-start raw-log hit scores |
+| `neighbor_expansion` / `neighbor_decay` | `True` / 0.6 | Pull in one-hop graph neighbours of anchors, with this edge-weight multiplier |
+| `w_association` | 0.10 | Weight of neighbour evidence in the blend |
+| `storage_backend` | `"json"` | `"json"` (one file) or `"sqlite"` (incremental saves) |
+| `stage2_enabled` / `stage2_model` | `False` / `claude-opus-5` | Offline LLM refinement (needs an `llm_client`) |
+| `stage2_max_messages` / `stage2_min_confidence` | 60 / 0.5 | Messages per LLM call; proposals below this confidence are dropped |
 | `correction_window_messages` | 3 | How close an explicit correction must be to supersede a preference/policy |
 | `ner_labels` | PERSON, ORG, GPE, ... | spaCy entity labels that become nodes |
 | `buffer_flush_interval` | 30s | WAL persistence interval |
-| `stage2_enabled` | `False` | Reserved flag for optional Stage-2 refinement |
 | `ann_index_type` | `"none"` | Reserved ANN index mode |
 | `delete_snapshots_on_hard_delete` | `True` | Scrub matching snapshot memory on hard delete |
 
@@ -319,7 +389,8 @@ config = AWHMConfig(
 │   ├── {session_id}.jsonl
 │   └── ...
 ├── graph/
-│   └── memory_graph.json          # The memory graph
+│   ├── memory_graph.json          # The memory graph (storage_backend="json")
+│   └── memory_graph.sqlite        # ... or one row per node (storage_backend="sqlite")
 ├── snapshots/
 │   └── snapshot_{timestamp}.json  # Manual backups
 ├── wal/
@@ -361,11 +432,13 @@ src/awhm/
 ├── config.py              # All parameters + path helpers
 ├── types.py               # Enums: Role, NodeType, NodeStatus, EdgeType, BufferEntryType
 ├── mcp_server.py          # MCP server for Claude Code
-├── eval/                  # Built-in benchmark harness
+├── hooks.py               # Claude Code hook commands (prompt / stop / session-end)
+├── timeutil.py            # Timestamp parsing, validity windows
+├── eval/                  # Built-in benchmark + real-corpus replay (LongMemEval loader)
 ├── raw_log/               # Append-only JSONL logging
 ├── session_buffer/        # Regex pattern matching + WAL
-├── graph/                 # Memory graph, strength scoring, serialization
-├── consolidation/         # NER, temporal, extraction, linking, dedup, pipeline
+├── graph/                 # Memory graph, strength scoring, JSON/SQLite stores
+├── consolidation/         # NER, temporal, extraction, entities, dedup, Stage 2, pipeline
 ├── retrieval/             # Embedding, BM25, ranking, retrieval engine
 ├── snapshots/             # Snapshot create/restore/list
 ├── deletion/              # Hard-delete cascade

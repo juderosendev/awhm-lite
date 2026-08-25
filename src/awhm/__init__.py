@@ -41,7 +41,7 @@ from .session_buffer.wal import WALManager
 from .snapshots.manager import SnapshotManager
 from .types import BufferEntryType, EdgeType, NodeStatus, NodeType, Role
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "AWHMConfig",

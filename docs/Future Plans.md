@@ -1,45 +1,33 @@
 # Future Plans
 
-## Target Date
-Sunday, February 22, 2026
+## Done (v0.3.0, August 2026)
 
-## Goal
-Make memory work automatically in the background for Claude Code and Codex, without visible tool-call noise.
+The original plan below (silent per-turn middleware) shipped as Claude Code
+hooks: `awhm hook prompt` / `stop` / `session-end`. Also shipped: Stage 2 LLM
+refinement, entity resolution with aliases, time-travel queries, neighbour
+expansion, SQLite storage and real-corpus evaluation. See CHANGELOG.md.
 
-## Why This Direction
-- Better reliability: no dependence on the model remembering to call `memory_log`.
-- Better accuracy: keep verbatim raw logs as ground truth.
-- Better UX: memory happens silently behind the scenes.
-- Better auditing: derived memories can be traced back to source text.
+## Next
 
-## Simple Per-Turn Flow
-1. User sends a message.
-2. Middleware logs the user message verbatim.
-3. Middleware queries memory for the top 5 most relevant memories.
-4. Middleware injects those memories as hidden context.
-5. Model generates a response.
-6. Middleware logs the assistant response verbatim.
-7. Background consolidation extracts compact atomic memories from raw logs.
+- Run LongMemEval end to end with real embeddings and Stage 2, and publish
+  the numbers (recall by category, contradiction rate).
+- Salience at formation: corrections and explicit rules should start with
+  higher strength instead of earning it through access counts.
+- Spreading activation beyond one hop, with the whitepaper's lateral
+  inhibition, once the graph is dense enough to need it.
+- Permissions: per-source visibility so a memory derived from one context
+  is not surfaced in another.
 
-## Design Rules
-- Verbatim logging is mandatory.
-- Atomic memories are derived artifacts, not replacements for raw logs.
-- Preserve qualifiers (time, negation, uncertainty, scope) during extraction.
-- Use `include_history=false` by default when injecting memory context.
+## Original plan (February 2026)
 
-## Implementation Plan (Tomorrow)
-1. Add a middleware wrapper that always executes `log -> query -> hidden inject -> respond -> log`.
-2. Enforce top-5 memory injection with filtering (score threshold + dedupe).
-3. Add periodic consolidation (every N turns) and final consolidation at session end.
-4. Add tracing/debug mode to inspect what was injected each turn.
-5. Add tests for:
-   - verbatim logging always happening,
-   - top-5 hidden injection behavior,
-   - qualifier-preserving atomic extraction,
-   - no paraphrase-only storage as source of truth.
+Goal: make memory work automatically in the background for Claude Code and
+Codex, without visible tool-call noise.
 
-## Open Decisions
-- Where to host middleware (MCP server layer vs separate backend service).
-- Score threshold and filtering rules for top-5 selection.
-- Consolidation cadence (`every N turns` vs timed async worker).
+Per-turn flow: log the user message verbatim, query memory for the top
+memories, inject them as hidden context, let the model respond, log the
+response verbatim, consolidate in the background.
 
+Design rules: verbatim logging is mandatory; atomic memories are derived
+artifacts, not replacements for raw logs; preserve qualifiers (time,
+negation, uncertainty, scope) during extraction; hide superseded memories by
+default when injecting.
