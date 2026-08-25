@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote, unquote
 
 DEFAULT_DATA_DIR = "~/.awhm"
 
@@ -125,6 +126,14 @@ class AWHMConfig:
     @property
     def wal_path(self) -> Path:
         return self.wal_dir / "session_buffer.wal"
+
+    def log_path_for_session(self, session_id: str) -> Path:
+        """Raw log file for a session; the id is percent-encoded so any string is safe."""
+        return self.logs_dir / f"{quote(session_id, safe='')}.jsonl"
+
+    @staticmethod
+    def session_id_from_log_path(path: Path) -> str:
+        return unquote(path.stem)
 
     def wal_path_for_session(self, session_id: str) -> Path:
         """Return session-scoped WAL path with a filesystem-safe filename."""

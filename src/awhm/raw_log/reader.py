@@ -21,14 +21,14 @@ class RawLogReader:
         if not logs_dir.exists():
             return []
         files = sorted(logs_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime)
-        return [f.stem for f in files]
+        return [self.config.session_id_from_log_path(f) for f in files]
 
     def session_count(self) -> int:
         return len(self.list_sessions())
 
     def read_session(self, session_id: str) -> list[LogEntry]:
         """Read all entries from a session log file."""
-        path = self.config.logs_dir / f"{session_id}.jsonl"
+        path = self.config.log_path_for_session(session_id)
         if not path.exists():
             return []
         entries: list[LogEntry] = []
@@ -56,7 +56,7 @@ class RawLogReader:
 
     def hard_delete_entries_exact(self, session_id: str, content_match: str) -> int:
         """Delete entries whose normalized content exactly matches content_match."""
-        path = self.config.logs_dir / f"{session_id}.jsonl"
+        path = self.config.log_path_for_session(session_id)
         if not path.exists():
             return 0
         entries = self.read_session(session_id)
@@ -79,7 +79,7 @@ class RawLogReader:
         """Delete entries by 0-based message index within a session log."""
         if not message_indices:
             return 0
-        path = self.config.logs_dir / f"{session_id}.jsonl"
+        path = self.config.log_path_for_session(session_id)
         if not path.exists():
             return 0
         entries = self.read_session(session_id)
@@ -95,7 +95,7 @@ class RawLogReader:
 
     def delete_session(self, session_id: str) -> bool:
         """Delete an entire session log file."""
-        path = self.config.logs_dir / f"{session_id}.jsonl"
+        path = self.config.log_path_for_session(session_id)
         if path.exists():
             path.unlink()
             return True

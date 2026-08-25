@@ -71,3 +71,12 @@ def test_delete_session(config):
     reader = RawLogReader(config)
     assert reader.delete_session("s1")
     assert reader.session_count() == 0
+
+
+def test_session_ids_with_slashes_and_spaces_round_trip(config):
+    for sid in ["a/h1", "with space", "claude-123"]:
+        RawLogger(config, sid).log(Role.USER, f"hello {sid}")
+    reader = RawLogReader(config)
+    assert set(reader.list_sessions()) == {"a/h1", "with space", "claude-123"}
+    assert reader.read_session("a/h1")[0].content == "hello a/h1"
+    assert not (config.logs_dir / "a").exists()

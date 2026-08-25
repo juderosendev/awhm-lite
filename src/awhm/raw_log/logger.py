@@ -17,7 +17,7 @@ class RawLogger:
     def __init__(self, config: AWHMConfig, session_id: str) -> None:
         self.config = config
         self.session_id = session_id
-        self._path = config.logs_dir / f"{session_id}.jsonl"
+        self._path = config.log_path_for_session(session_id)
         config.ensure_dirs()
         self._msg_index = self._count_existing()
 
