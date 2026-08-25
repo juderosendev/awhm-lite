@@ -14,13 +14,13 @@ def get_session(args):
     from .. import AWHMSession
 
     config = AWHMConfig(data_dir=args.data_dir)
-    llm_client = None
     if getattr(args, "stage2", False):
-        from ..consolidation.stage2 import AnthropicClient
-
         config.stage2_enabled = True
-        llm_client = AnthropicClient(model=args.stage2_model or config.stage2_model)
-    return AWHMSession.start_session(config, use_mock_embeddings=args.mock, llm_client=llm_client)
+        if getattr(args, "stage2_client", None):
+            config.stage2_client = args.stage2_client
+        if getattr(args, "stage2_model", None):
+            config.stage2_model = args.stage2_model
+    return AWHMSession.start_session(config, use_mock_embeddings=args.mock)
 
 
 def cmd_status(args):
@@ -192,9 +192,16 @@ def main():
     p_cons.add_argument(
         "--stage2",
         action="store_true",
-        help="Also run Stage 2 LLM refinement (needs the [stage2] extra and Anthropic credentials)",
+        help="Also run Stage 2 LLM refinement via the Claude Code CLI (claude -p); no API key needed",
     )
-    p_cons.add_argument("--stage2-model", dest="stage2_model", default=None, help="Model for Stage 2")
+    p_cons.add_argument(
+        "--stage2-client",
+        dest="stage2_client",
+        choices=["claude-code", "anthropic"],
+        default=None,
+        help="LLM client for Stage 2 (default: claude-code)",
+    )
+    p_cons.add_argument("--stage2-model", dest="stage2_model", default=None, help="Model for Stage 2 (e.g. sonnet)")
 
     # snapshot
     p_snap = sub.add_parser("snapshot", help="Manage snapshots")

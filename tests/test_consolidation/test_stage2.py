@@ -1,15 +1,24 @@
 """Tests for Stage 2 LLM refinement (with a mock client)."""
 
 import json
+import subprocess
 import sys
 
 import pytest
 
 from awhm import AWHMSession
 from awhm.config import AWHMConfig
-from awhm.consolidation.stage2 import AnthropicClient, MockLLMClient, Stage2Refiner, parse_memories
+from awhm.consolidation.stage2 import (
+    MEMORY_SCHEMA,
+    AnthropicClient,
+    MockLLMClient,
+    Stage2Refiner,
+    parse_memories,
+)
 from awhm.raw_log.models import LogEntry
 from awhm.types import Role
+
+MEMORY_SCHEMA_STUB = MEMORY_SCHEMA
 
 
 def _entries(*texts):
@@ -119,7 +128,7 @@ def test_stage2_disabled_never_calls_client(tmp_path):
 
 def test_anthropic_client_requires_extra(monkeypatch):
     monkeypatch.setitem(sys.modules, "anthropic", None)
-    with pytest.raises(RuntimeError, match=r"\[stage2\]"):
+    with pytest.raises(RuntimeError, match=r"\[anthropic\]"):
         AnthropicClient()
 
 
@@ -162,3 +171,74 @@ def test_anthropic_client_request_shape():
     fake2 = FakeClient()
     AnthropicClient(client=fake2, fallbacks=False).complete_json("s", "u", {"type": "object"})
     assert "fallbacks" not in fake2.calls[0] and "betas" not in fake2.calls[0]
+
+
+def _fake_runner(envelope, returncode=0, stderr=""):
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return subprocess.CompletedProcess(cmd, returncode, stdout=json.dumps(envelope), stderr=stderr)
+
+    run.calls = calls
+    return run
+
+
+def test_claude_code_client_uses_structured_output(monkeypatch):
+    from awhm.consolidation.stage2 import HOOK_GUARD_ENV, ClaudeCodeClient
+
+    monkeypatch.setenv("CLAUDECODE", "1")
+    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "cli")
+    runner = _fake_runner({"is_error": False, "structured_output": {"memories": [_memory()]}, "result": "ignored"})
+    client = ClaudeCodeClient(model="sonnet", runner=runner)
+    out = json.loads(client.complete_json("sys", "user text", MEMORY_SCHEMA_STUB))
+    assert out["memories"][0]["content"].startswith("The user's preferred editor")
+
+    cmd, kwargs = runner.calls[0]
+    assert cmd[:3] == ["claude", "-p", "user text"]
+    assert "--json-schema" in cmd and "--tools" in cmd and cmd[cmd.index("--tools") + 1] == ""
+    assert cmd[cmd.index("--model") + 1] == "sonnet"
+    assert "--no-session-persistence" in cmd and "--max-turns" in cmd
+    env = kwargs["env"]
+    assert env[HOOK_GUARD_ENV] == "1"
+    assert "CLAUDECODE" not in env and "CLAUDE_CODE_ENTRYPOINT" not in env
+    assert kwargs["stdin"] is subprocess.DEVNULL
+
+
+def test_claude_code_client_falls_back_to_result_text():
+    from awhm.consolidation.stage2 import ClaudeCodeClient
+
+    runner = _fake_runner({"is_error": False, "structured_output": None, "result": '{"memories": []}'})
+    assert json.loads(ClaudeCodeClient(runner=runner).complete_json("s", "u", {})) == {"memories": []}
+
+
+def test_claude_code_client_surfaces_errors():
+    from awhm.consolidation.stage2 import ClaudeCodeClient
+
+    with pytest.raises(RuntimeError, match="Not logged in"):
+        ClaudeCodeClient(runner=_fake_runner({"is_error": True, "result": "Not logged in · Please run /login"})).complete_json("s", "u", {})
+    with pytest.raises(RuntimeError, match="exited 1"):
+        ClaudeCodeClient(runner=_fake_runner({}, returncode=1, stderr="boom")).complete_json("s", "u", {})
+
+
+def test_make_client_defaults_to_claude_code(monkeypatch):
+    from awhm.consolidation import stage2 as s2
+
+    monkeypatch.setattr(s2.shutil, "which", lambda name: "/usr/local/bin/claude")
+    assert isinstance(s2.make_client(), s2.ClaudeCodeClient)
+    assert isinstance(s2.make_client("claude-code", "sonnet"), s2.ClaudeCodeClient)
+    with pytest.raises(ValueError):
+        s2.make_client("openai")
+    monkeypatch.setattr(s2.shutil, "which", lambda name: None)
+    with pytest.raises(RuntimeError, match="not found on PATH"):
+        s2.make_client()
+
+
+def test_session_builds_default_client_when_stage2_enabled(tmp_path, monkeypatch):
+    from awhm.consolidation import stage2 as s2
+
+    monkeypatch.setattr(s2.shutil, "which", lambda name: "/usr/local/bin/claude")
+    config = AWHMConfig(data_dir=str(tmp_path / "awhm"), stage2_enabled=True, stage2_model="sonnet")
+    with AWHMSession.start_session(config, session_id="s1", use_mock_embeddings=True) as s:
+        assert isinstance(s.llm_client, s2.ClaudeCodeClient)
+        assert s.llm_client.model == "sonnet"

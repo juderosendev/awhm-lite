@@ -24,6 +24,7 @@ import sys
 from typing import IO, Any
 
 from .config import AWHMConfig
+from .consolidation.stage2 import HOOK_GUARD_ENV
 from .types import Role
 
 logger = logging.getLogger("awhm.hooks")
@@ -115,10 +116,18 @@ def cmd_stop(payload: dict[str, Any], config: AWHMConfig, *, use_mock: bool = Fa
         session.suspend()
 
 
-def cmd_session_end(payload: dict[str, Any], config: AWHMConfig, *, use_mock: bool = False) -> int:
+def cmd_session_end(
+    payload: dict[str, Any],
+    config: AWHMConfig,
+    *,
+    use_mock: bool = False,
+    stage2: bool = False,
+) -> int:
     """Consolidate the session into the graph. Returns new node count."""
     from . import AWHMSession
 
+    if stage2:
+        config.stage2_enabled = True
     session = AWHMSession.start_session(
         config, session_id=_session_id(payload), use_mock_embeddings=use_mock,
     )
@@ -156,7 +165,11 @@ def run(argv: list[str], stdin: IO[str] = sys.stdin, stdout: IO[str] = sys.stdou
     p_prompt.add_argument("-k", type=int, default=DEFAULT_K)
     p_prompt.add_argument("--semantic", action="store_true", help="Also use embeddings (slower start)")
     sub.add_parser("stop", help="Stop: log the assistant reply")
-    sub.add_parser("session-end", help="SessionEnd: consolidate the session")
+    p_end = sub.add_parser("session-end", help="SessionEnd: consolidate the session")
+    p_end.add_argument(
+        "--stage2", action="store_true",
+        help="Also run Stage 2 refinement through `claude -p` (or set AWHM_STAGE2=1)",
+    )
     p_settings = sub.add_parser("settings", help="Print the settings.json hooks block")
     p_settings.add_argument("--command", default=None, help="Executable path to use in the snippet")
     args = parser.parse_args(argv)
@@ -164,6 +177,9 @@ def run(argv: list[str], stdin: IO[str] = sys.stdin, stdout: IO[str] = sys.stdou
     if args.event == "settings":
         stdout.write(json.dumps(settings_snippet(args.command), indent=2) + "\n")
         return 0
+
+    if os.environ.get(HOOK_GUARD_ENV):
+        return 0  # we are inside a Stage 2 `claude -p` call; do not recurse
 
     config = _config_from_env()
     use_mock = _use_mock()
@@ -176,7 +192,8 @@ def run(argv: list[str], stdin: IO[str] = sys.stdin, stdout: IO[str] = sys.stdou
         elif args.event == "stop":
             cmd_stop(payload, config, use_mock=use_mock)
         elif args.event == "session-end":
-            count = cmd_session_end(payload, config, use_mock=use_mock)
+            stage2 = args.stage2 or os.environ.get("AWHM_STAGE2", "").lower() in ("1", "true")
+            count = cmd_session_end(payload, config, use_mock=use_mock, stage2=stage2)
             sys.stderr.write(f"awhm: consolidated {count} new memor{'y' if count == 1 else 'ies'}\n")
     except Exception as exc:  # never block the user's session
         logger.exception("hook failed")

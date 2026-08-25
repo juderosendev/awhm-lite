@@ -7,13 +7,20 @@ memories the rules did not find. The LLM only *proposes*: deterministic code
 validates every proposal (schema, provenance, confidence), drops anything
 already captured, and commits through the same slot-key and supersession
 rules as everything else. Retrieval stays zero-LLM.
+
+No API key is required. The default client shells out to the Claude Code
+CLI (``claude -p``), which uses whatever login the CLI already has. An
+Anthropic SDK client exists as an explicitly optional alternative.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import shutil
+import subprocess
 from collections.abc import Callable
 from typing import Any, Protocol
 
@@ -78,7 +85,10 @@ class LLMClient(Protocol):
 
 
 class AnthropicClient:
-    """LLMClient backed by the Anthropic SDK (optional extra ``[stage2]``).
+    """LLMClient backed by the Anthropic SDK (optional extra ``[anthropic]``).
+
+    Only for people who prefer API billing; the default ``ClaudeCodeClient``
+    needs no key.
 
     Uses structured outputs so the response is schema-valid JSON, and the
     server-side refusal fallback so a policy decline on the primary model
@@ -98,7 +108,8 @@ class AnthropicClient:
                 import anthropic
             except ImportError as exc:
                 raise RuntimeError(
-                    "Stage 2 needs the Anthropic SDK: pip install 'awhm-lite[stage2]'"
+                    "The Anthropic SDK client needs: pip install 'awhm-lite[anthropic]' "
+                    "(or use the default ClaudeCodeClient, which needs no API key)"
                 ) from exc
             client = anthropic.Anthropic()
         self._client = client
@@ -126,6 +137,94 @@ class AnthropicClient:
             if getattr(block, "type", None) == "text":
                 return block.text
         raise RuntimeError("Stage 2 response contained no text block")
+
+
+HOOK_GUARD_ENV = "AWHM_HOOK_ACTIVE"
+_NESTED_SESSION_VARS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")
+
+Runner = Callable[..., "subprocess.CompletedProcess[str]"]
+
+
+class ClaudeCodeClient:
+    """LLMClient that runs ``claude -p`` (the Claude Code CLI). No API key.
+
+    Uses the CLI's structured output (``--json-schema``) so the reply is
+    schema-valid JSON, disables tools, and marks the subprocess with
+    ``AWHM_HOOK_ACTIVE`` so the memory hooks do not fire recursively when
+    Stage 2 itself runs from a hook.
+    """
+
+    def __init__(
+        self,
+        model: str | None = None,
+        *,
+        executable: str = "claude",
+        timeout: float = 180.0,
+        runner: Runner | None = None,
+    ) -> None:
+        self.model = model
+        self.executable = executable
+        self.timeout = timeout
+        self._runner = runner or subprocess.run
+        if runner is None and shutil.which(executable) is None:
+            raise RuntimeError(
+                f"Claude Code CLI '{executable}' not found on PATH; install Claude Code "
+                "or pass a different LLM client."
+            )
+
+    def command(self, system: str, user: str, schema: dict[str, Any]) -> list[str]:
+        cmd = [
+            self.executable, "-p", user,
+            "--system-prompt", system,
+            "--output-format", "json",
+            "--json-schema", json.dumps(schema),
+            "--tools", "",
+            "--no-session-persistence",
+            "--max-turns", "1",
+        ]
+        if self.model:
+            cmd += ["--model", self.model]
+        return cmd
+
+    def environment(self) -> dict[str, str]:
+        env = {k: v for k, v in os.environ.items() if k not in _NESTED_SESSION_VARS}
+        env[HOOK_GUARD_ENV] = "1"
+        return env
+
+    def complete_json(self, system: str, user: str, schema: dict[str, Any]) -> str:
+        proc = self._runner(
+            self.command(system, user, schema),
+            capture_output=True,
+            text=True,
+            env=self.environment(),
+            stdin=subprocess.DEVNULL,
+            timeout=self.timeout,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"claude -p exited {proc.returncode}: {proc.stderr.strip()[:300]}")
+        try:
+            envelope = json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"claude -p returned non-JSON output: {proc.stdout[:200]!r}") from exc
+        if envelope.get("is_error"):
+            raise RuntimeError(f"claude -p error: {str(envelope.get('result'))[:300]}")
+        structured = envelope.get("structured_output")
+        if structured is not None:
+            return json.dumps(structured)
+        result = envelope.get("result")
+        if isinstance(result, str) and result.strip():
+            return result
+        raise RuntimeError("claude -p returned no result")
+
+
+def make_client(kind: str = "claude-code", model: str | None = None) -> LLMClient:
+    """Build the Stage 2 client named by ``config.stage2_client``."""
+    kind = (kind or "claude-code").lower()
+    if kind in ("claude-code", "claude", "cli"):
+        return ClaudeCodeClient(model=model)
+    if kind == "anthropic":
+        return AnthropicClient(model=model or "claude-opus-5")
+    raise ValueError(f"Unknown stage2_client {kind!r}; use 'claude-code' or 'anthropic'")
 
 
 class MockLLMClient:

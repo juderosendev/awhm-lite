@@ -13,9 +13,11 @@ and old files load unchanged.
   message numbering from the existing file. `AWHMSession.suspend()`.
 - **Stage 2 LLM refinement**: an LLM proposes the memories the rules missed;
   code validates provenance, confidence and duplicates and commits through
-  the normal slot rules. `AnthropicClient` (structured outputs, refusal
-  fallback), `MockLLMClient`, `LLMClient` protocol, `[stage2]` extra,
-  `awhm consolidate --stage2`. Retrieval stays zero-LLM.
+  the normal slot rules. Default client is the Claude Code CLI
+  (`ClaudeCodeClient`, `claude -p` with structured output: no API key);
+  `AnthropicClient` is an optional alternative (`[anthropic]` extra).
+  `MockLLMClient`, `LLMClient` protocol, `awhm consolidate --stage2`,
+  `awhm hook session-end --stage2`. Retrieval stays zero-LLM.
 - **Real-corpus evaluation**: `awhm eval --corpus` replays sessions and
   scores questions (Recall@k, nDCG@k, contradiction rate, latency,
   per-category); `--longmemeval` loads LongMemEval with per-instance isolation.

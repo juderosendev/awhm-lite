@@ -21,7 +21,13 @@ from typing import Any
 
 from .config import AWHMConfig
 from .consolidation.pipeline import Stage1Pipeline
-from .consolidation.stage2 import AnthropicClient, LLMClient, MockLLMClient
+from .consolidation.stage2 import (
+    AnthropicClient,
+    ClaudeCodeClient,
+    LLMClient,
+    MockLLMClient,
+    make_client,
+)
 from .deletion.hard_delete import DeletionResult, hard_delete
 from .graph.memory_graph import MemoryGraph
 from .graph.serialization import load_graph, save_graph
@@ -47,8 +53,10 @@ __all__ = [
     "AWHMConfig",
     "AWHMSession",
     "AnthropicClient",
+    "ClaudeCodeClient",
     "LLMClient",
     "MockLLMClient",
+    "make_client",
     "BM25Index",
     "BufferEntryType",
     "DeletionResult",
@@ -130,7 +138,9 @@ class AWHMSession:
             use_mock_embeddings: Deterministic hash-based embeddings, for
                 tests and for running without sentence-transformers.
             llm_client: Enables Stage 2 refinement during consolidation when
-                ``config.stage2_enabled`` is set (e.g. ``AnthropicClient()``).
+                ``config.stage2_enabled`` is set. ``None`` with
+                ``stage2_enabled=True`` builds the client named by
+                ``config.stage2_client`` (default: the Claude Code CLI).
         """
         config = config or AWHMConfig()
         config.ensure_dirs()
@@ -143,6 +153,8 @@ class AWHMSession:
         else:
             embedding = SentenceTransformerEmbedding(config.embed_model)
 
+        if llm_client is None and config.stage2_enabled:
+            llm_client = make_client(config.stage2_client, config.stage2_model)
         session = cls(config, session_id, graph, embedding, llm_client=llm_client)
         session.wal.recover()  # crash recovery
         session.wal.start()

@@ -67,14 +67,13 @@ awhm eval --corpus longmemeval_oracle.json --longmemeval -k 5          # Stage 1
 awhm eval --corpus longmemeval_oracle.json --longmemeval -k 5 --limit 100 --json > stage1.json
 ```
 
-Stage 2 on a subset (needs `pip install -e ".[stage2]"` and Anthropic credentials):
+Stage 2 on a subset (uses the Claude Code CLI login, no API key):
 
 ```python
-from awhm import AnthropicClient
 from awhm.config import AWHMConfig
 from awhm.eval import load_longmemeval, run_replay, summarize
 
 corpus = load_longmemeval("longmemeval_oracle.json", limit=100)
-config = AWHMConfig(stage2_enabled=True)
-print(summarize(run_replay(corpus, k=5, config=config, llm_client=AnthropicClient())))
+config = AWHMConfig(stage2_enabled=True, stage2_model="sonnet")
+print(summarize(run_replay(corpus, k=5, config=config)))
 ```

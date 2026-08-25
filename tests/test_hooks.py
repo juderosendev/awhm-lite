@@ -74,3 +74,29 @@ def test_settings_snippet_shape():
     out = io.StringIO()
     assert run(["settings", "--command", "awhm"], stdout=out) == 0
     assert json.loads(out.getvalue())["hooks"]["Stop"][0]["hooks"][0]["command"] == "awhm hook stop"
+
+
+def test_hooks_do_not_recurse_inside_stage2(tmp_path, monkeypatch):
+    monkeypatch.setenv("AWHM_DATA_DIR", str(tmp_path / "awhm"))
+    monkeypatch.setenv("AWHM_HOOK_ACTIVE", "1")
+    out = io.StringIO()
+    assert run(["prompt"], stdin=io.StringIO(json.dumps(_payload(user_prompt="I prefer tabs"))), stdout=out) == 0
+    assert out.getvalue() == ""
+    assert not (tmp_path / "awhm" / "logs").exists()
+
+
+def test_session_end_stage2_flag_uses_default_client(tmp_path, monkeypatch):
+    from awhm.consolidation import stage2 as s2
+
+    monkeypatch.setattr(s2.shutil, "which", lambda name: "/usr/local/bin/claude")
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return __import__("subprocess").CompletedProcess(cmd, 0, stdout=json.dumps({"is_error": False, "structured_output": {"memories": []}}), stderr="")
+
+    monkeypatch.setattr(s2.subprocess, "run", fake_run)
+    config = AWHMConfig(data_dir=str(tmp_path / "awhm"))
+    cmd_prompt(_payload(user_prompt="The API endpoint is https://api.example.com"), config, use_mock=True)
+    cmd_session_end(_payload(), config, use_mock=True, stage2=True)
+    assert seen["cmd"][:2] == ["claude", "-p"]

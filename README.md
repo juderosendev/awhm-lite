@@ -57,8 +57,9 @@ python -m spacy download en_core_web_sm
 # Claude Code MCP integration
 pip install -e ".[mcp]"
 
-# Stage 2 (optional LLM refinement during consolidation)
-pip install -e ".[stage2]"
+# Optional: Anthropic SDK client for Stage 2 (the default Stage 2 client is
+# the Claude Code CLI and needs nothing extra)
+pip install -e ".[anthropic]"
 ```
 
 `sentence-transformers` is optional because it pulls in PyTorch. Without it, start
@@ -148,7 +149,7 @@ its write-ahead log between them.
 |-------|---------|--------------|
 | `UserPromptSubmit` | `awhm hook prompt` | Logs the prompt, retrieves the top memories (BM25 + buffer; add `--semantic` to also use embeddings) and returns them as hidden context |
 | `Stop` | `awhm hook stop` | Logs the assistant's reply |
-| `SessionEnd` | `awhm hook session-end` | Consolidates the session into the graph |
+| `SessionEnd` | `awhm hook session-end` | Consolidates the session into the graph (add `--stage2`, or set `AWHM_STAGE2=1`, to also run Stage 2 through `claude -p`) |
 
 ```bash
 awhm hook settings          # prints the block to merge into ~/.claude/settings.json
@@ -273,7 +274,7 @@ similarity with the same entity type. Every resolved mention is recorded as an
 alias on the node, and statements get association edges to the entities they
 mention, so retrieval can walk from "Acme" to everything known about it.
 
-### Stage 2 (optional LLM refinement)
+### Stage 2 (optional LLM refinement, no API key)
 Stage 1 has a hard ceiling: it catches "I prefer Rust" and misses "let's go with
 Rust then". Stage 2 runs after Stage 1, offline, and asks an LLM to propose the
 memories the rules did not find. The LLM only proposes: code validates every
@@ -281,17 +282,27 @@ proposal (schema, cited message numbers must exist, confidence floor), drops
 anything already captured, and commits through the same slot and supersession
 rules. Retrieval stays zero-LLM.
 
-```python
-from awhm import AWHMSession, AWHMConfig, AnthropicClient
+The default client shells out to the Claude Code CLI (`claude -p` with
+structured output), so it uses the login you already have and no API key is
+stored anywhere. It marks the call so the memory hooks do not fire inside it.
 
-config = AWHMConfig(stage2_enabled=True, stage2_model="claude-opus-5")
-with AWHMSession.start_session(config, llm_client=AnthropicClient()) as session:
+```bash
+awhm consolidate --stage2                    # Claude Code CLI, default model
+awhm consolidate --stage2 --stage2-model sonnet
+```
+
+```python
+from awhm import AWHMSession, AWHMConfig
+
+config = AWHMConfig(stage2_enabled=True, stage2_model="sonnet")
+with AWHMSession.start_session(config) as session:   # builds ClaudeCodeClient
     ...
     session.consolidate_current()
 ```
 
-Or from the CLI: `awhm consolidate --stage2`. Any object with a
-`complete_json(system, user, schema) -> str` method works as a client.
+Any object with a `complete_json(system, user, schema) -> str` method works as
+a client (`llm_client=...`). An Anthropic SDK client is included for people
+who prefer API billing (`stage2_client="anthropic"`, extra `[anthropic]`).
 
 ### Retrieval
 Zero LLM calls. Feature-based fusion:
@@ -367,7 +378,8 @@ All parameters are configurable via `AWHMConfig`:
 | `neighbor_expansion` / `neighbor_decay` | `True` / 0.6 | Pull in one-hop graph neighbours of anchors, with this edge-weight multiplier |
 | `w_association` | 0.10 | Weight of neighbour evidence in the blend |
 | `storage_backend` | `"json"` | `"json"` (one file) or `"sqlite"` (incremental saves) |
-| `stage2_enabled` / `stage2_model` | `False` / `claude-opus-5` | Offline LLM refinement (needs an `llm_client`) |
+| `stage2_enabled` | `False` | Offline LLM refinement after Stage 1 |
+| `stage2_client` / `stage2_model` | `"claude-code"` / `None` | `claude-code` (CLI, no key) or `anthropic`; model alias, `None` = client default |
 | `stage2_max_messages` / `stage2_min_confidence` | 60 / 0.5 | Messages per LLM call; proposals below this confidence are dropped |
 | `correction_window_messages` | 3 | How close an explicit correction must be to supersede a preference/policy |
 | `ner_labels` | PERSON, ORG, GPE, ... | spaCy entity labels that become nodes |
