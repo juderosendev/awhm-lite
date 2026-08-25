@@ -6,15 +6,9 @@ from collections.abc import Iterable
 from datetime import datetime, timezone
 
 from ..config import AWHMConfig
+from ..timeutil import parse_timestamp
 from .memory_graph import MemoryGraph
 from .models import MemoryNode
-
-
-def _parse_timestamp(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
 
 
 class StrengthScorer:
@@ -26,7 +20,7 @@ class StrengthScorer:
     def recency_score(self, node: MemoryNode, now: datetime | None = None) -> float:
         """s_rec(v) = (1 + beta * delta_t) ** (-alpha), with delta_t in hours."""
         now = now or datetime.now(timezone.utc)
-        last = _parse_timestamp(node.last_accessed)
+        last = parse_timestamp(node.last_accessed)
         delta_hours = max((now - last).total_seconds() / 3600.0, 0.0)
         return (1.0 + self.config.beta * delta_hours) ** (-self.config.alpha)
 

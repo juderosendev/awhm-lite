@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime
 from typing import Any
 
 from .config import AWHMConfig
@@ -173,10 +174,21 @@ class AWHMSession:
         k: int | None = None,
         include_history: bool | None = None,
         with_trace: bool | None = None,
+        as_of: str | datetime | None = None,
+        semantic: bool = True,
     ) -> list[RetrievalResult]:
-        """Retrieve the memories most relevant to ``query_text``."""
+        """Retrieve the memories most relevant to ``query_text``.
+
+        ``as_of`` answers as of a past moment (validity windows instead of
+        current status); ``semantic=False`` skips embeddings entirely.
+        """
         return self.retrieval.query(
-            query_text, k=k, include_history=include_history, with_trace=with_trace,
+            query_text,
+            k=k,
+            include_history=include_history,
+            with_trace=with_trace,
+            as_of=as_of,
+            semantic=semantic,
         )
 
     # ── Consolidation ──────────────────────────────────────────

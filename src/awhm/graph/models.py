@@ -50,6 +50,8 @@ class MemoryNode:
     valid_to: str | None = None
     confidence: float = 0.6
     entity_type: str | None = None
+    aliases: list[str] = field(default_factory=list)
+    mentioned_dates: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +73,8 @@ class MemoryNode:
             "valid_to": self.valid_to,
             "confidence": self.confidence,
             "entity_type": self.entity_type,
+            "aliases": self.aliases,
+            "mentioned_dates": self.mentioned_dates,
         }
 
     @classmethod
@@ -95,6 +99,8 @@ class MemoryNode:
             valid_to=d.get("valid_to"),
             confidence=float(d.get("confidence", 0.6)),
             entity_type=d.get("entity_type"),
+            aliases=list(d.get("aliases", [])),
+            mentioned_dates=list(d.get("mentioned_dates", [])),
         )
 
 

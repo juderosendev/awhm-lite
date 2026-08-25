@@ -47,6 +47,7 @@ async def memory_query(
     k: int = 10,
     include_history: bool = False,
     with_trace: bool = False,
+    as_of: str | None = None,
 ) -> str:
     """Search long-term memory for information relevant to the query.
 
@@ -59,6 +60,7 @@ async def memory_query(
         k: Maximum number of results to return (default 10).
         include_history: Include superseded/retracted memories.
         with_trace: Include ranking feature trace details.
+        as_of: ISO-8601 timestamp; answer as of that moment (time travel).
     """
     session = _get_session()
     results = session.query(
@@ -66,6 +68,7 @@ async def memory_query(
         k=k,
         include_history=include_history,
         with_trace=with_trace,
+        as_of=as_of,
     )
     if not results:
         return "No memories found."

@@ -290,7 +290,7 @@ All parameters are configurable via `AWHMConfig`:
 | `k` | 10 | Top-k retrieval count |
 | `entity_link_threshold` | 0.85 | Cosine threshold for entity linking |
 | `dedup_threshold` | 0.92 | Cosine threshold for deduplication |
-| `bm25_threshold` | 1.0 | Minimum BM25 score for anchor set |
+| `bm25_anchor_ratio` | 0.5 | Lexical anchor if score >= ratio x best BM25 score |
 | `embed_threshold` | 0.3 | Minimum cosine sim for anchor set |
 | `raw_log_score_scale` | 0.5 | Upper bound for cold-start raw-log hit scores |
 | `correction_window_messages` | 3 | How close an explicit correction must be to supersede a preference/policy |

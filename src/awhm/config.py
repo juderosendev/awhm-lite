@@ -46,15 +46,18 @@ class AWHMConfig:
     w_lexical: float = 0.20
     w_strength: float = 0.15
     w_confidence: float = 0.10
+    w_association: float = 0.10       # Weight of graph-neighbour evidence
     contradiction_penalty: float = 0.35
     include_history_by_default: bool = False
     trace_retrieval: bool = False
 
     # Retrieval
     k: int = 10
-    bm25_threshold: float = 1.0         # Minimum raw BM25 score for a lexical anchor
+    bm25_anchor_ratio: float = 0.5      # Lexical anchor: score >= ratio * best BM25 score
     embed_threshold: float = 0.3        # Minimum cosine similarity for a semantic anchor
     raw_log_score_scale: float = 0.5    # Cold-start hits are scaled into [0, scale]
+    neighbor_expansion: bool = True     # Pull in one-hop graph neighbours of anchors
+    neighbor_decay: float = 0.6         # Edge weight multiplier for expanded neighbours
 
     # Consolidation
     entity_link_threshold: float = 0.85     # Cosine threshold for entity linking
@@ -79,6 +82,9 @@ class AWHMConfig:
     # Privacy/deletion behaviour
     delete_snapshots_on_hard_delete: bool = True
 
+    # Storage backend for the graph: "json" (one file) or "sqlite" (incremental)
+    storage_backend: str = "json"
+
     def __post_init__(self) -> None:
         self.data_dir = os.path.expanduser(os.path.expandvars(self.data_dir))
         self.ner_labels = frozenset(label.upper() for label in self.ner_labels)
@@ -100,6 +106,10 @@ class AWHMConfig:
     @property
     def graph_path(self) -> Path:
         return self.graph_dir / "memory_graph.json"
+
+    @property
+    def sqlite_path(self) -> Path:
+        return self.graph_dir / "memory_graph.sqlite"
 
     @property
     def snapshots_dir(self) -> Path:

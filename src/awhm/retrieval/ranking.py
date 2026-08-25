@@ -14,6 +14,7 @@ class RankingFeatures:
     strength: float
     confidence: float
     status_bonus: float = 1.0
+    association: float = 0.0  # strongest edge weight from an anchor, 0 for anchors themselves
 
 
 def blended_rank_score(features: RankingFeatures, config: AWHMConfig) -> float:
@@ -27,6 +28,7 @@ def blended_rank_score(features: RankingFeatures, config: AWHMConfig) -> float:
         + config.w_lexical * max(features.lexical_score, 0.0)
         + config.w_strength * max(features.strength, 0.0)
         + config.w_confidence * max(features.confidence, 0.0)
+        + config.w_association * max(features.association, 0.0)
     )
     penalty = (1.0 - min(max(features.status_bonus, 0.0), 1.0)) * config.contradiction_penalty
     return max(base - penalty, 0.0)

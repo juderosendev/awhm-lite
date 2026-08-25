@@ -56,6 +56,8 @@ def _migrate_graph_data(data: dict[str, Any]) -> bool:
             "valid_to": None,
             "confidence": 0.6,
             "entity_type": None,
+            "aliases": [],
+            "mentioned_dates": [],
         }
         for key, value in defaults.items():
             if key not in node:

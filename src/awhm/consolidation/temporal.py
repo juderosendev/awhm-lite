@@ -13,6 +13,8 @@ class ResolvedDate:
     resolved: datetime
     iso: str
     message_index: int | None = None
+    start: int = 0  # character span within the source message
+    end: int = 0
 
 
 # Common date-like patterns to extract candidates
@@ -26,6 +28,30 @@ DATE_PATTERNS = [
 ]
 
 
+_FROM_MARKERS = re.compile(
+    r"(?i)\b(?:from|since|starting|as of|effective|beginning)\s*(?:on|in)?\s*$"
+)
+_UNTIL_MARKERS = re.compile(r"(?i)\b(?:until|till|through|up to|ending)\s*(?:on|in)?\s*$")
+
+
+def validity_from_context(text: str, dates: list[ResolvedDate]) -> tuple[str | None, str | None]:
+    """Infer a validity window from how dates are introduced in ``text``.
+
+    "from March 5" / "since yesterday" set ``valid_from``; "until Friday" sets
+    ``valid_to``. Only the few words before each date are inspected, so a
+    date mentioned in passing leaves the window open.
+    """
+    valid_from: str | None = None
+    valid_to: str | None = None
+    for d in dates:
+        prefix = text[max(0, d.start - 24):d.start]
+        if _FROM_MARKERS.search(prefix):
+            valid_from = d.iso
+        elif _UNTIL_MARKERS.search(prefix):
+            valid_to = d.iso
+    return valid_from, valid_to
+
+
 class TemporalParser:
     """Extract and resolve date/time references."""
 
@@ -37,14 +63,14 @@ class TemporalParser:
         """Find and resolve date references in text."""
         import dateparser
 
-        candidates: list[str] = []
+        candidates: list[tuple[str, int, int]] = []
         for pattern in DATE_PATTERNS:
             for match in pattern.finditer(text):
-                candidates.append(match.group(0))
+                candidates.append((match.group(0), match.start(), match.end()))
 
         results: list[ResolvedDate] = []
         seen: set[str] = set()
-        for candidate in candidates:
+        for candidate, start, end in candidates:
             if candidate.lower() in seen:
                 continue
             seen.add(candidate.lower())
@@ -55,6 +81,8 @@ class TemporalParser:
                     resolved=parsed,
                     iso=parsed.isoformat(),
                     message_index=message_index,
+                    start=start,
+                    end=end,
                 ))
         return results
 

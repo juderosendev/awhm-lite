@@ -1,15 +1,20 @@
-"""RetrievalEngine: buffer check -> anchors -> feature ranking -> top-k.
+"""RetrievalEngine: buffer check -> anchors -> neighbours -> feature ranking -> top-k.
 
 Zero LLM calls. Lexical (BM25) and semantic (embedding) anchor sets are
-unioned, then every anchor is scored by a weighted blend of semantic
-similarity, lexical score, strength and consolidation confidence. While the
-system is cold (few sessions) a BM25 pass over the raw logs fills the gaps.
+unioned, one-hop graph neighbours of the anchors are pulled in with a
+decayed edge weight, and every candidate is scored by a weighted blend of
+semantic similarity, lexical score, strength, consolidation confidence and
+neighbour evidence. While the system is cold (few sessions) a BM25 pass over
+the raw logs fills the gaps.
+
+``as_of`` turns any query into a time-travel query: only memories whose
+validity window covers that moment are eligible, superseded ones included.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 import numpy as np
@@ -21,10 +26,12 @@ from ..consolidation.canonical import (
     is_correction,
 )
 from ..graph.memory_graph import MemoryGraph
+from ..graph.models import MemoryNode
 from ..graph.strength import StrengthScorer
 from ..raw_log.reader import RawLogReader
 from ..session_buffer.buffer import SessionBuffer
 from ..session_buffer.models import BufferEntry
+from ..timeutil import parse_timestamp, utcnow, valid_at
 from ..types import NodeStatus
 from .bm25 import BM25Index
 from .embedding import EmbeddingService, cosine_similarity_matrix
@@ -82,19 +89,35 @@ class RetrievalEngine:
         k: int | None = None,
         include_history: bool | None = None,
         with_trace: bool | None = None,
+        as_of: str | datetime | None = None,
+        semantic: bool = True,
     ) -> list[RetrievalResult]:
-        """Run the full retrieval pipeline and return the top ``k`` results."""
+        """Run the full retrieval pipeline and return the top ``k`` results.
+
+        Args:
+            k: result count (default ``config.k``).
+            include_history: include superseded/retracted memories.
+            with_trace: attach per-result feature traces.
+            as_of: answer as of this moment; memories are filtered by their
+                validity window instead of their current status.
+            semantic: set False to skip embeddings entirely (BM25 and buffer
+                only). Useful where loading the embedding model is too slow,
+                e.g. in per-turn hooks.
+        """
         k = self.config.k if k is None else k
         if include_history is None:
             include_history = self.config.include_history_by_default
         if with_trace is None:
             with_trace = self.config.trace_retrieval
+        moment = parse_timestamp(as_of) if as_of is not None else None
 
-        results = self._buffer_results(query_text, include_history)
+        results = self._buffer_results(query_text, include_history, moment)
         if self.graph.node_count() > 0:
-            results.extend(self._graph_retrieval(query_text, k, include_history, with_trace))
+            results.extend(self._graph_retrieval(
+                query_text, k, include_history, with_trace, moment, semantic,
+            ))
         if self.log_reader.session_count() < self.config.cold_start_session_count:
-            results.extend(self._raw_log_fallback(query_text, k))
+            results.extend(self._raw_log_fallback(query_text, k, moment))
 
         results.sort(key=lambda r: r.score, reverse=True)
         seen: set[str] = set()
@@ -108,8 +131,15 @@ class RetrievalEngine:
 
     # ── Step 0: session buffer ─────────────────────────────────
 
-    def _buffer_results(self, query_text: str, include_history: bool) -> list[RetrievalResult]:
+    def _buffer_results(
+        self,
+        query_text: str,
+        include_history: bool,
+        moment: datetime | None,
+    ) -> list[RetrievalResult]:
         hits = self.buffer.search(query_text)
+        if moment is not None:
+            hits = [h for h in hits if parse_timestamp(h.timestamp) <= moment]
         if not include_history:
             hits = self._current_buffer_hits(hits)
         hits.sort(key=lambda e: e.source_msg, reverse=True)
@@ -144,7 +174,7 @@ class RetrievalEngine:
                 current.append(entry)
         return current
 
-    # ── Steps 1-2: graph anchors and ranking ───────────────────
+    # ── Steps 1-3: anchors, neighbours, ranking ────────────────
 
     def _bm25_index(self) -> tuple[BM25Index, list[str]]:
         """BM25 over node contents, rebuilt only when nodes change."""
@@ -154,12 +184,20 @@ class RetrievalEngine:
             self._bm25_version = self.graph.content_version
         return self._bm25, self._bm25_node_ids
 
+    def _eligible(self, node: MemoryNode, include_history: bool, moment: datetime | None) -> bool:
+        if moment is not None:
+            return valid_at(node.valid_from or node.created_at, node.valid_to, moment)
+        status = node.status or NodeStatus.ACTIVE.value
+        return include_history or status == NodeStatus.ACTIVE.value
+
     def _graph_retrieval(
         self,
         query_text: str,
         k: int,
         include_history: bool,
         with_trace: bool,
+        moment: datetime | None,
+        semantic: bool,
     ) -> list[RetrievalResult]:
         bm25, node_ids = self._bm25_index()
         if not node_ids:
@@ -173,41 +211,53 @@ class RetrievalEngine:
         for idx, score in bm25_hits:
             nid = node_ids[idx]
             lexical[nid] = score / max_bm25 if max_bm25 > 0 else 0.0
-            if score >= self.config.bm25_threshold:
+            if lexical[nid] >= self.config.bm25_anchor_ratio:
                 anchors.add(nid)
 
         # Semantic anchors
-        query_emb = self.embedding.encode_single(query_text)
-        emb_matrix, emb_ids = self.graph.get_embedding_matrix()
-        semantic: dict[str, float] = {}
-        if emb_matrix.size > 0:
-            sims = cosine_similarity_matrix(query_emb, emb_matrix)
-            for i, nid in enumerate(emb_ids):
-                semantic[nid] = float(sims[i])
-                if semantic[nid] >= self.config.embed_threshold:
-                    anchors.add(nid)
+        query_emb: np.ndarray | None = None
+        semantic_sims: dict[str, float] = {}
+        if semantic:
+            query_emb = self.embedding.encode_single(query_text)
+            emb_matrix, emb_ids = self.graph.get_embedding_matrix()
+            if emb_matrix.size > 0:
+                sims = cosine_similarity_matrix(query_emb, emb_matrix)
+                for i, nid in enumerate(emb_ids):
+                    semantic_sims[nid] = float(sims[i])
+                    if semantic_sims[nid] >= self.config.embed_threshold:
+                        anchors.add(nid)
 
         if not anchors:
             return []
 
-        now = datetime.now(timezone.utc)
-        candidates = []
-        for nid in anchors:
+        # One-hop neighbours of the anchors, carrying the strongest edge weight
+        association: dict[str, float] = {}
+        if self.config.neighbor_expansion:
+            for nid in list(anchors):
+                for edge in self.graph.get_edges_for_node(nid):
+                    other = edge.target if edge.source == nid else edge.source
+                    if other in anchors or other == nid:
+                        continue
+                    weight = max(edge.weight, 0.0) * self.config.neighbor_decay
+                    if weight > association.get(other, 0.0):
+                        association[other] = weight
+
+        candidates: list[MemoryNode] = []
+        for nid in list(anchors) + list(association):
             node = self.graph.get_node(nid)
-            if node is None:
-                continue
-            status = node.status or NodeStatus.ACTIVE.value
-            if not include_history and status != NodeStatus.ACTIVE.value:
-                continue
-            candidates.append(node)
+            if node is not None and self._eligible(node, include_history, moment):
+                candidates.append(node)
+        if not candidates:
+            return []
 
         # Strength is only needed for the candidates we are about to rank.
+        now = utcnow()
         self.scorer.update_nodes(self.graph, candidates, now)
 
         results: list[RetrievalResult] = []
         for node in candidates:
-            sim = semantic.get(node.id)
-            if sim is None and node.embedding:
+            sim = semantic_sims.get(node.id)
+            if sim is None and query_emb is not None and node.embedding:
                 node_emb = np.asarray(node.embedding, dtype=np.float32).reshape(1, -1)
                 sim = float(cosine_similarity_matrix(query_emb, node_emb)[0])
             status = node.status or NodeStatus.ACTIVE.value
@@ -216,7 +266,8 @@ class RetrievalEngine:
                 lexical_score=lexical.get(node.id, 0.0),
                 strength=node.strength.composite,
                 confidence=min(max(float(node.confidence), 0.0), 1.0),
-                status_bonus=1.0 if status == NodeStatus.ACTIVE.value else 0.0,
+                status_bonus=1.0 if (moment is not None or status == NodeStatus.ACTIVE.value) else 0.0,
+                association=association.get(node.id, 0.0),
             )
             trace = None
             if with_trace:
@@ -226,6 +277,7 @@ class RetrievalEngine:
                     "strength": features.strength,
                     "confidence": features.confidence,
                     "status_bonus": features.status_bonus,
+                    "association": features.association,
                 }
             results.append(RetrievalResult(
                 node_id=node.id,
@@ -242,12 +294,18 @@ class RetrievalEngine:
 
     # ── Cold-start fallback ────────────────────────────────────
 
-    def _raw_log_fallback(self, query_text: str, k: int) -> list[RetrievalResult]:
+    def _raw_log_fallback(
+        self,
+        query_text: str,
+        k: int,
+        moment: datetime | None,
+    ) -> list[RetrievalResult]:
         """BM25 over raw log messages, scaled into ``[0, raw_log_score_scale]``."""
         documents = [
             entry.content
             for entries in self.log_reader.read_all_sessions().values()
             for entry in entries
+            if moment is None or parse_timestamp(entry.timestamp) <= moment
         ]
         if not documents:
             return []

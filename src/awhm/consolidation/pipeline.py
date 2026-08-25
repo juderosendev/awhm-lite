@@ -33,7 +33,7 @@ from .deduplication import find_duplicates, first_occurrences, statement_key
 from .entity_linking import find_links
 from .extraction import extract_from_log_entries
 from .ner import NERExtractor
-from .temporal import TemporalParser
+from .temporal import ResolvedDate, TemporalParser, validity_from_context
 
 logger = logging.getLogger("awhm.consolidation")
 
@@ -44,7 +44,6 @@ CONFIDENCE_BY_EXTRACTION = {
     "outcome": 0.65,
 }
 CONFIDENCE_NER = 0.75
-CONFIDENCE_TEMPORAL = 0.65
 
 NODE_TYPE_BY_EXTRACTION = {
     "correction": NodeType.SEMANTIC.value,
@@ -69,6 +68,9 @@ class Candidate:
     extraction_type: str | None = None
     is_correction: bool = False
     refs: list[dict[str, Any]] = field(default_factory=list)
+    valid_from: str | None = None
+    valid_to: str | None = None
+    mentioned_dates: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.refs and self.message_index is not None:
@@ -159,6 +161,11 @@ class Stage1Pipeline:
         messages = [e.content for e in entries]
         candidates: list[Candidate] = []
 
+        dates_by_message: dict[int, list[ResolvedDate]] = {}
+        for d in self._extract_dates(messages, start_idx):
+            if d.message_index is not None:
+                dates_by_message.setdefault(d.message_index, []).append(d)
+
         for ent in self._extract_entities(messages, start_idx):
             candidates.append(Candidate(
                 content=f"{ent.label}: {ent.text}",
@@ -172,6 +179,11 @@ class Stage1Pipeline:
             ))
 
         for ext in extract_from_log_entries(entries, message_offset=start_idx):
+            # Dates mentioned in the same message enrich the statement: they
+            # become its validity window when introduced with "from"/"until",
+            # and are kept as context otherwise. They never become nodes.
+            dates = dates_by_message.get(ext.message_index, [])
+            valid_from, valid_to = validity_from_context(ext.source_message, dates)
             candidates.append(Candidate(
                 content=ext.content,
                 node_type=NODE_TYPE_BY_EXTRACTION.get(ext.type, NodeType.EPISODIC.value),
@@ -181,16 +193,9 @@ class Stage1Pipeline:
                 session_id=session_id,
                 extraction_type=ext.type,
                 is_correction=ext.type == "correction" or is_correction(ext.content),
-            ))
-
-        for d in self._extract_dates(messages, start_idx):
-            candidates.append(Candidate(
-                content=f"Date reference: {d.original} -> {d.iso}",
-                node_type=NodeType.EPISODIC.value,
-                source="temporal",
-                confidence=CONFIDENCE_TEMPORAL,
-                message_index=d.message_index,
-                session_id=session_id,
+                valid_from=valid_from,
+                valid_to=valid_to,
+                mentioned_dates=[d.iso for d in dates],
             ))
 
         keep = first_occurrences([c.content for c in candidates])
@@ -275,10 +280,11 @@ class Stage1Pipeline:
                 canonical_key=key,
                 status=NodeStatus.ACTIVE.value,
                 supersedes=superseded,
-                valid_from=now_iso,
-                valid_to=None,
+                valid_from=cand.valid_from or now_iso,
+                valid_to=cand.valid_to,
                 confidence=cand.confidence,
                 entity_type=cand.entity_label,
+                mentioned_dates=list(cand.mentioned_dates),
             )
             self.graph.add_node(node)
             new_count += 1

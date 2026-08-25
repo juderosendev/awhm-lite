@@ -33,6 +33,7 @@ def cmd_query(args):
             k=args.k,
             include_history=args.include_history,
             with_trace=args.trace,
+            as_of=args.as_of,
         )
         for i, r in enumerate(results, 1):
             print(f"\n--- Result {i} (score: {r.score:.4f}, source: {r.source}) ---")
@@ -158,6 +159,12 @@ def main():
         "--trace",
         action="store_true",
         help="Show per-result ranking feature traces",
+    )
+    p_query.add_argument(
+        "--as-of",
+        dest="as_of",
+        default=None,
+        help="Answer as of this ISO-8601 moment (e.g. 2026-03-01)",
     )
 
     # consolidate
