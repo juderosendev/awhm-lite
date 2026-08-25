@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -19,12 +19,15 @@ class EmbeddingService(Protocol):
     def dim(self) -> int: ...
 
 
+_MODEL_CACHE: dict[str, Any] = {}
+
+
 class SentenceTransformerEmbedding:
     """Embedding service backed by sentence-transformers.
 
-    The model is loaded lazily on first use so that constructing a session
-    stays cheap and the optional dependency is only required when embeddings
-    are actually computed.
+    The model is loaded lazily on first use and shared process-wide per model
+    name, so opening many sessions in one process (replay evaluation, the MCP
+    server) loads the weights once rather than once per session.
     """
 
     def __init__(self, model_name: str = "all-MiniLM-L6-v2") -> None:
@@ -34,16 +37,20 @@ class SentenceTransformerEmbedding:
 
     def _load(self):
         if self._model is None:
-            try:
-                from sentence_transformers import SentenceTransformer
-            except ImportError as exc:  # pragma: no cover - exercised only without the extra
-                raise RuntimeError(
-                    "sentence-transformers is not installed. Install it with "
-                    "`pip install 'awhm-lite[embeddings]'`, or start the session "
-                    "with use_mock_embeddings=True."
-                ) from exc
-            self._model = SentenceTransformer(self._model_name)
-            self._dim = int(self._model.get_sentence_embedding_dimension())
+            model = _MODEL_CACHE.get(self._model_name)
+            if model is None:
+                try:
+                    from sentence_transformers import SentenceTransformer
+                except ImportError as exc:  # pragma: no cover - only without the extra
+                    raise RuntimeError(
+                        "sentence-transformers is not installed. Install it with "
+                        "`pip install 'awhm-lite[embeddings]'`, or start the session "
+                        "with use_mock_embeddings=True."
+                    ) from exc
+                model = SentenceTransformer(self._model_name)
+                _MODEL_CACHE[self._model_name] = model
+            self._model = model
+            self._dim = int(model.get_sentence_embedding_dimension())
         return self._model
 
     @property
