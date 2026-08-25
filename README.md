@@ -335,6 +335,11 @@ LongMemEval instances are consolidated and questioned in isolation, matching
 the benchmark protocol. Matching is by answer substring, a deliberate lower
 bound: paraphrased hits are not counted.
 
+**Measured (Stage 1 only, oracle split, 500 questions): Recall@5 0.196**, from
+0.40 on single-session user facts down to 0.00 on preferences, at 4 ms per
+query. That is the regex ceiling made visible; Stage 2 exists to lift it.
+Full table, caveats and reproduction in [docs/benchmarks.md](docs/benchmarks.md).
+
 ## Configuration
 
 All parameters are configurable via `AWHMConfig`:

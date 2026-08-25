@@ -36,6 +36,10 @@ and old files load unchanged.
 - Lexical anchors use a relative threshold (`bm25_anchor_ratio`) instead of
   an absolute BM25 floor that tiny corpora could never reach.
 - `bm25_threshold` removed.
+- The sentence-transformers model is shared per process.
+
+### Measured
+- LongMemEval oracle split, Stage 1 only: Recall@5 0.196 (docs/benchmarks.md).
 
 ## 0.2.0 (August 2026)
 
